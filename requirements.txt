@@ -12,7 +12,7 @@ langchain-core==0.3.46
 langgraph==0.3.17
 langgraph-checkpoint==2.0.21
 langgraph-prebuilt==0.1.3
-langgraph-sdk==0.1.57
+langgraph-sdk==0.1.58
 langsmith==0.3.18
 msgpack==1.1.0
 orjson==3.10.15
@@ -27,3 +27,7 @@ tenacity==9.0.0
 typing_extensions==4.12.2
 urllib3==2.3.0
 zstandard==0.23.0
+# Speech recognition components
+pyaudio==0.2.14
+pywhispercpp==1.3.0
+python-dotenv==1.0.1
