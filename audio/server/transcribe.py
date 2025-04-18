@@ -31,6 +31,7 @@ class TranscriptionResult(BaseModel):
     segments: List[Dict[str, Any]] = []
     duration: float = 0.0
     process_time: float = 0.0
+    # Note: client reference is now handled via a non-serialized _websocket attribute
     
 class Transcriber:
     """Handles transcription of audio data"""
@@ -78,8 +79,19 @@ class Transcriber:
             sample_rate: Sample rate of the audio in Hz (default: 16000 Hz)
                          Note: This must match the actual sample rate of the provided audio data
         """
+        if not audio_data or len(audio_data) == 0:
+            print("ERROR: Empty audio data passed to transcribe_audio")
+            return TranscriptionResult(
+                text="Error: Empty audio data",
+                language="en",
+                duration=0.0,
+                process_time=0.0
+            )
+            
         if self.model is None:
-            raise RuntimeError("Transcription model not initialized")
+            if not self.initialize():
+                raise RuntimeError("Failed to initialize transcription model")
+            print("Transcription model initialized on demand")
                 
         try:
             # Calculate audio duration directly from PCM data (assuming 16-bit audio)
@@ -90,6 +102,28 @@ class Transcriber:
             # Check if audio has content
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             audio_rms = np.sqrt(np.mean(audio_np.astype(np.float32)**2))
+            
+            # Apply gain if audio is too quiet but not silent - IMPORTANT FOR QUALITY
+            # This block actually improves transcription quality significantly
+            if 10.0 < audio_rms < 200.0:
+                # Calculate a reasonable gain factor (amplify quiet audio)
+                target_rms = 2000.0  # Target a moderate RMS level
+                gain_factor = min(target_rms / audio_rms, 15.0)  # Cap gain to avoid excessive amplification
+                
+                # Apply gain (being careful to avoid integer overflow)
+                audio_np_float = audio_np.astype(np.float32)
+                audio_np_float = audio_np_float * gain_factor
+                
+                # Clip to int16 range
+                audio_np_float = np.clip(audio_np_float, -32768, 32767)
+                audio_np = audio_np_float.astype(np.int16)
+                
+                # Replace the original audio data
+                audio_data = audio_np.tobytes()
+                
+                # Recalculate RMS after gain
+                audio_rms = np.sqrt(np.mean(audio_np.astype(np.float32)**2))
+                print(f"Amplified quiet audio: gain={gain_factor:.1f}x, new RMS={audio_rms:.2f}")
             
             # Check if audio is too quiet - provide a fallback
             if audio_rms < 100:  # Arbitrary threshold, adjust as needed
@@ -103,6 +137,14 @@ class Transcriber:
             
             print(f"Transcribing {len(audio_data)/1024:.1f}KB audio ({duration:.2f}s, RMS: {audio_rms:.2f})")
             
+            # Validate audio data
+            if len(audio_data) < 1000:
+                print(f"Warning: Audio data very short ({len(audio_data)} bytes)")
+            
+            # Verify CoreML settings
+            coreml_setting = os.environ.get("WHISPER_COREML", "Not set")
+            print(f"CoreML setting: WHISPER_COREML={coreml_setting}")
+            
             # Save to a temporary file - pywhispercpp requires a file path
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as temp_file:
                 temp_path = temp_file.name
@@ -114,8 +156,11 @@ class Transcriber:
                     wf.setframerate(sample_rate)
                     wf.writeframes(audio_data)
                 
+                print(f"Temporary file created: {temp_path}")
+                
                 # Run transcription
                 start_time = time.time()
+                print(f"Starting whisper transcription...")
                 segments = self.model.transcribe(temp_path)
                 process_time = time.time() - start_time
                 

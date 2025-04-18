@@ -166,8 +166,8 @@ class VADHandler:
         self.buffer = []
         self.last_is_speech = False
         self.last_confidence = 0.0
-        self.silence_start = None
-        self.speech_start = None
+        self.silence_start = time.time()  # Initialize with current time to avoid NoneType error
+        self.speech_start = time.time()  # Initialize with current time
         
         # Add a buffer for continuous audio processing
         self.audio_buffer = np.array([], dtype=np.int16)
@@ -361,5 +361,5 @@ class VADHandler:
         self.audio_buffer = np.array([], dtype=np.int16)
         self.last_is_speech = False
         self.last_confidence = 0.0
-        self.silence_start = None
-        self.speech_start = None 
+        self.silence_start = time.time()
+        self.speech_start = time.time() 

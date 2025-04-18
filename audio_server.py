@@ -53,7 +53,8 @@ async def main(args):
         port=args.port,
         vad_config=vad_config,
         transcription_config=transcription_config,
-        transcription_callback=demo_transcription_callback
+        transcription_callback=demo_transcription_callback,
+        save_recordings=args.save_recordings
     )
     
     # Setup signal handlers
@@ -66,6 +67,10 @@ async def main(args):
     # Start server
     await server.start()
     print(f"Audio server started on ws://{args.host}:{args.port}")
+    if args.save_recordings:
+        print("Audio recording is ENABLED - Transcribed speech will be saved to 'recordings/' directory")
+    else:
+        print("Audio recording is disabled - Use --save-recordings flag to enable")
     print("Press Ctrl+C to stop")
     
     # Keep running until interrupted
@@ -97,6 +102,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cpu", help="Device to run model on")
     parser.add_argument("--compute-type", type=str, default="int8", help="Compute type for model")
     parser.add_argument("--language", type=str, default="auto", help="Language for transcription")
+    parser.add_argument("--save-recordings", action="store_true", dest="save_recordings", 
+                        help="Save transcribed audio to disk")
     args = parser.parse_args()
     
     try:

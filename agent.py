@@ -8,7 +8,7 @@ from langgraph.graph.message import add_messages, AnyMessage
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.tools import BaseTool
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_community.tools import TavilySearchResults
 
@@ -22,9 +22,51 @@ import httpx
 # Load environment variables
 load_dotenv(override = True)
 
+# Global tool reference for callback registration
+hang_up_tool_instance = None
+
 # Define state
 class AgentState(BaseModel):
     messages: Annotated[List[AnyMessage], add_messages]
+
+# Define a tool for hanging up the call
+class HangUpTool(BaseTool):
+    name: str = "hang_up"
+    description: str = (
+        "End the conversation and hang up the call. Use this when the conversation has naturally concluded, "
+        "all questions have been answered, or the user has requested to end the call. "
+        "Provide a friendly farewell message that will be spoken to the user before hanging up."
+    )
+    
+    # Define the input schema
+    class HangUpInput(BaseModel):
+        reason: str = Field(
+            description=(
+                "A friendly goodbye message to say to the user before hanging up. "
+                "For example: 'Thanks for chatting, goodbye!' or 'I'll let you go now, have a great day!'"
+            )
+        )
+    
+    args_schema: type[BaseModel] = HangUpInput
+    
+    # Reference to the hang_up method
+    _hang_up_callback = None
+    
+    def set_callback(self, callback):
+        """Set the callback function to hang up the call"""
+        self._hang_up_callback = callback
+        
+    async def _arun(self, reason: str) -> str:
+        """Run the hang up tool"""
+        if self._hang_up_callback is None:
+            return "Unable to hang up: No callback function set"
+            
+        # Call the hang_up callback
+        return await self._hang_up_callback(reason)
+    
+    def _run(self, reason: str) -> str:
+        """Synchronous run - this won't be used since we'll use arun"""
+        raise NotImplementedError("This tool only supports async execution")
 
 # Load environment variables
 ha_api_key = os.getenv("HA_API_KEY")
@@ -108,13 +150,23 @@ async def make_graph():
         mcp_tools = client.get_tools()
         current_music_info["mcp_tools"] = mcp_tools
         
-        # Combine MCP tools with Tavily if available
+        # Create the hang up tool
+        hang_up_tool = HangUpTool()
+        
+        # Store it in a variable we can access later for callback setup
+        # We need to access this specific instance later
+        global hang_up_tool_instance
+        hang_up_tool_instance = hang_up_tool
+        
+        # Combine MCP tools with Tavily and hang_up tool
         all_tools = [*mcp_tools]
         if tavily_tool:
             all_tools.append(tavily_tool)
-            print(f"Added Tavily tool to the agent's tools list. Total tools: {len(all_tools)}")
-        else:
-            print("Tavily tool not added due to error")
+            print(f"Added Tavily tool to the agent's tools list")
+        
+        # Add the hang_up tool
+        all_tools.append(hang_up_tool)
+        print(f"Added Hang Up tool to the agent's tools list. Total tools: {len(all_tools)}")
 
         # Get homeassistant prompt
         system_message = await client.get_prompt("homeassistant", "Assist", None)
@@ -134,14 +186,16 @@ Currently playing: {current_song}
 Additional Instructions:
 1. Always be aware of the current date ({current_date}) when answering questions about time or dates
 2. For general knowledge questions or current information, use the tavily_search_results tool
-3. Be concise but informative in your responses
-4. When using tools, explain what you're doing before using them unless it's obvious
-5. If you're unsure about something, use the search tool to verify the information
-6. For smart home controls, confirm the action before executing it
-7. For music playback, suggest appropriate music based on the context (default to 80s pop or rock)
+3. Be extremely concise in your responses - keep them to a single short sentence whenever possible
+4. When using tools, explain what you're doing in just a few words before using them
+5. After using a tool, always check if it accomplished what the user wanted - if not, try to fix it or explain the issue briefly
+6. For smart home controls, execute the action without asking for confirmation unless it's something risky
+7. For music playback, start playing appropriate music without lengthy explanations
 8. You know that "{current_song}" is currently playing (if anything)
+9. IMPORTANT: Since your responses will be read aloud via text-to-speech, avoid using any formatting or special characters
+10. Use the hang_up tool when the conversation has naturally concluded or when the user explicitly asks to end the call. Provide a very brief farewell.
 
-Remember to use the appropriate tools based on the user's request. If you need to search for current information, use the Tavily search tool."""
+Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form."""
 
         # Create LLM
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -175,7 +229,44 @@ Remember to use the appropriate tools based on the user's request. If you need t
                     *messages
                 ]
             
+            # Check if the previous message is a ToolMessage indicating a tool result
+            # Only do verification if we haven't already verified this tool result
+            should_verify = False
+            if len(messages) >= 2 and hasattr(messages[-1], 'type') and messages[-1].type == 'tool':
+                tool_message = messages[-1]
+                
+                # Check if this tool result has already been verified
+                already_verified = False
+                if hasattr(tool_message, '_verified') and tool_message._verified:
+                    already_verified = True
+                    
+                if not already_verified:
+                    # Get the previous human message for context
+                    previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                    
+                    # Make sure this isn't our verification prompt
+                    if previous_human_msg and not previous_human_msg.content.startswith("The tool returned the above result"):
+                        verification_prompt = (
+                            f"Briefly verify if the tool result addressed the request: '{previous_human_msg.content}'. "
+                            f"Be EXTREMELY concise, using just a few words. If successful, say only what was done. "
+                            f"If it failed, try once more or briefly explain why."
+                        )
+                        # Add this as a human message
+                        messages.append(HumanMessage(content=verification_prompt))
+                        # Mark the tool message as verified to prevent loops
+                        setattr(tool_message, '_verified', True)
+                        should_verify = True
+            
             response = llm_with_tools.invoke(messages)
+            
+            # If this was a verification response, ensure it's extremely short
+            if should_verify and hasattr(response, 'content'):
+                # Truncate to ensure brevity in verification responses
+                content = response.content
+                if len(content) > 80:
+                    shortened = content[:77] + "..."
+                    response.content = shortened
+                
             return AgentState(messages=[response])
         
         # Add nodes to graph
@@ -247,8 +338,8 @@ async def setup_and_run():
                                             
                                             # Format args nicely
                                             args_str = json.dumps(args, indent=2)
-                                            print(f"Using {tool_name} with args:", flush=True)
-                                            print(f"  {args_str.replace('\\n', '\\n  ')}", flush=True)
+                                            indent = '\n  '
+                                            print("  " + args_str.replace('\n', '\n  '), flush=True)
                                         
                                         # Mark that we've printed tool calls for this message
                                         setattr(message_chunk, '_tool_calls_printed', True)

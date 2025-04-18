@@ -9,35 +9,42 @@ Usage:
 
 import asyncio
 import websockets
-import base64
 import json
-import time
-import pyaudio
+import base64
 import numpy as np
+import pyaudio
 import wave
 import io
+import time
 import argparse
-from scipy import signal
 
 class SimpleAudioClient:
     def __init__(self, server_url="ws://localhost:8765"):
+        """Initialize audio client"""
         self.server_url = server_url
         self.websocket = None
-        self.sequence = 0
-        
-        # Audio configuration
-        self.mic_sample_rate = 16000         # 16kHz for Whisper
-        self.speaker_sample_rate = 24000     # 24kHz for Kokoro TTS
-        self.chunk_size = 1024               # Process audio in these sized chunks
-        self.channels = 1                    # Mono audio
-        
-        # PyAudio objects
         self.pyaudio = None
         self.mic_stream = None
         self.speaker_stream = None
-        
-        # Control flags
         self.running = False
+        self.sequence = 0  # Counter for message sequencing
+        
+        # Audio configuration
+        self.channels = 1  # Mono
+        self.mic_sample_rate = 16000  # 16kHz for whisper
+        self.speaker_sample_rate = 24000  # 24kHz for TTS audio
+        self.chunk_size = 1024  # Samples per chunk
+        
+        # For handling chunked audio from server
+        self.audio_chunks = {}  # Dictionary to store partial audio chunks
+        
+        # Try to import the signal module for resampling
+        try:
+            from scipy import signal
+            self.has_signal = True
+        except ImportError:
+            print("scipy.signal not available, audio resampling will be limited")
+            self.has_signal = False
         
     async def connect(self):
         """Connect to server and initialize audio devices"""
@@ -184,52 +191,67 @@ class SimpleAudioClient:
                     
                     # Handle audio playback messages
                     if msg["type"] == "audio_playback":
-                        # Decode audio data
-                        audio_data = base64.b64decode(msg["payload"]["audio"])
+                        # Check if this is a chunked message
+                        chunk_info = msg["payload"].get("chunk_info", None)
                         
-                        # Process the audio (it could be a WAV file or raw PCM)
-                        try:
-                            # Check if it's a WAV file (has RIFF header)
-                            if audio_data[:4] == b'RIFF':
-                                # Parse WAV data
-                                with io.BytesIO(audio_data) as wav_buffer:
-                                    with wave.open(wav_buffer, 'rb') as wf:
-                                        # Get WAV properties
-                                        wav_rate = wf.getframerate()
-                                        wav_channels = wf.getnchannels()
-                                        
-                                        # Read audio data
-                                        pcm_data = wf.readframes(wf.getnframes())
-                                        
-                                        # Check if we need to resample
-                                        if wav_rate != self.speaker_sample_rate:
-                                            # Convert to numpy array for resampling
-                                            audio_np = np.frombuffer(pcm_data, dtype=np.int16)
-                                            
-                                            # Reshape for multiple channels if needed
-                                            if wav_channels > 1:
-                                                audio_np = audio_np.reshape(-1, wav_channels)
-                                                # Convert to mono by averaging channels
-                                                audio_np = np.mean(audio_np, axis=1, dtype=np.int16)
-                                            
-                                            # Resample to speaker rate
-                                            resampled = signal.resample_poly(
-                                                audio_np,
-                                                self.speaker_sample_rate,
-                                                wav_rate
-                                            )
-                                            
-                                            # Convert back to int16
-                                            pcm_data = np.int16(resampled).tobytes()
-                            else:
-                                # Assume it's raw PCM at the speaker sample rate
-                                pcm_data = audio_data
-                                
-                            # Play the audio
-                            self.speaker_stream.write(pcm_data)
+                        if chunk_info:
+                            # This is a chunked message
+                            chunk_index = chunk_info["index"]
+                            total_chunks = chunk_info["total"]
+                            is_wav = chunk_info.get("is_wav", False)
                             
-                        except Exception as audio_err:
-                            print(f"Error processing audio: {audio_err}")
+                            # Generate a unique ID for this batch of chunks based on timestamp
+                            batch_id = msg.get("timestamp", time.time())
+                            
+                            # Create entry in audio_chunks if it doesn't exist
+                            if batch_id not in self.audio_chunks:
+                                self.audio_chunks[batch_id] = {
+                                    "chunks": [None] * total_chunks,
+                                    "received": 0,
+                                    "total": total_chunks,
+                                    "is_wav": is_wav
+                                }
+                            
+                            # Store this chunk
+                            audio_data = base64.b64decode(msg["payload"]["audio"])
+                            self.audio_chunks[batch_id]["chunks"][chunk_index] = audio_data
+                            self.audio_chunks[batch_id]["received"] += 1
+                            
+                            # Check if we have all chunks
+                            if self.audio_chunks[batch_id]["received"] == total_chunks:
+                                # Process complete audio
+                                if is_wav:
+                                    # For WAV, each chunk has header. Extract only first header
+                                    wav_header = self.audio_chunks[batch_id]["chunks"][0][:44]
+                                    
+                                    # Combine audio data (removing headers except for first chunk)
+                                    combined_data = wav_header
+                                    for i, chunk in enumerate(self.audio_chunks[batch_id]["chunks"]):
+                                        if i == 0:
+                                            combined_data += chunk[44:]
+                                        else:
+                                            combined_data += chunk[44:]
+                                            
+                                    # Process the complete WAV
+                                    self.process_and_play_audio(combined_data)
+                                else:
+                                    # For non-WAV, just concatenate the chunks
+                                    combined_data = b''.join(self.audio_chunks[batch_id]["chunks"])
+                                    self.process_and_play_audio(combined_data)
+                                    
+                                # Remove this batch from the dictionary
+                                del self.audio_chunks[batch_id]
+                                
+                                # Clean up old batches that might have been incomplete
+                                current_time = time.time()
+                                old_batches = [bid for bid in self.audio_chunks 
+                                              if isinstance(bid, float) and current_time - bid > 30]
+                                for old_id in old_batches:
+                                    del self.audio_chunks[old_id]
+                        else:
+                            # Regular non-chunked audio message
+                            audio_data = base64.b64decode(msg["payload"]["audio"])
+                            self.process_and_play_audio(audio_data)
                             
                     # Handle status messages (transcription, state updates)
                     elif msg["type"] == "status":
@@ -255,14 +277,79 @@ class SimpleAudioClient:
                     print(f"Invalid JSON: {message[:100]}...")
                 except Exception as e:
                     print(f"Error processing message: {e}")
+                    import traceback
+                    traceback.print_exc()
                     
         except websockets.exceptions.ConnectionClosed:
             print("Connection to server closed")
         except Exception as e:
             print(f"Error in receive loop: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.running = False
             
+    def process_and_play_audio(self, audio_data):
+        """Process audio data and play it"""
+        try:
+            # Check if it's a WAV file (has RIFF header)
+            if audio_data[:4] == b'RIFF':
+                # Parse WAV data
+                with io.BytesIO(audio_data) as wav_buffer:
+                    with wave.open(wav_buffer, 'rb') as wf:
+                        # Get WAV properties
+                        wav_rate = wf.getframerate()
+                        wav_channels = wf.getnchannels()
+                        
+                        # Read audio data
+                        pcm_data = wf.readframes(wf.getnframes())
+                        
+                        # Check if we need to resample
+                        if wav_rate != self.speaker_sample_rate:
+                            # Convert to numpy array for resampling
+                            audio_np = np.frombuffer(pcm_data, dtype=np.int16)
+                            
+                            # Reshape for multiple channels if needed
+                            if wav_channels > 1:
+                                audio_np = audio_np.reshape(-1, wav_channels)
+                                # Convert to mono by averaging channels
+                                audio_np = np.mean(audio_np, axis=1, dtype=np.int16)
+                            
+                            # Resample to speaker rate if scipy is available
+                            if self.has_signal:
+                                from scipy import signal
+                                resampled = signal.resample_poly(
+                                    audio_np,
+                                    self.speaker_sample_rate,
+                                    wav_rate
+                                )
+                                
+                                # Convert back to int16
+                                pcm_data = np.int16(resampled).tobytes()
+                            else:
+                                # Simple DIY resampling if scipy not available
+                                # This is not high quality but better than nothing
+                                ratio = self.speaker_sample_rate / wav_rate
+                                if ratio > 1:
+                                    # Upsample by repeating samples
+                                    indices = np.floor(np.arange(0, len(audio_np)) / ratio).astype(int)
+                                    pcm_data = np.int16(audio_np[indices]).tobytes()
+                                else:
+                                    # Downsample by skipping samples
+                                    indices = np.floor(np.arange(0, len(audio_np) * ratio) / ratio).astype(int)
+                                    pcm_data = np.int16(audio_np[indices]).tobytes()
+            else:
+                # Assume it's raw PCM at the speaker sample rate
+                pcm_data = audio_data
+                
+            # Play the audio
+            self.speaker_stream.write(pcm_data)
+            
+        except Exception as audio_err:
+            print(f"Error processing audio: {audio_err}")
+            import traceback
+            traceback.print_exc()
+
 async def main():
     """Main entry point"""
     # Parse command line arguments
