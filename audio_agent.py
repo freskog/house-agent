@@ -34,11 +34,6 @@ def clean_text_for_tts(text: str) -> str:
     Removes markdown, special formatting, and other elements that 
     don't work well when read aloud. Also optimizes for concise responses.
     """
-    # Check if this is a search verification response - if so, be more careful with cleaning
-    is_search_verification = False
-    if "search" in text.lower() and any(term in text.lower() for term in ["query", "found", "results", "refine"]):
-        is_search_verification = True
-        
     # Replace markdown code blocks (both with and without language specification)
     text = re.sub(r'```[\w]*\n(.*?)\n```', r'\1', text, flags=re.DOTALL)
     
@@ -72,15 +67,13 @@ def clean_text_for_tts(text: str) -> str:
     if text and text[-1] not in ['.', '!', '?']:
         text += '.'
     
-    # If this is a search verification, don't remove these phrases
-    if not is_search_verification:
-        # Remove redundant confirmations and verbose phrases
-        text = re.sub(r'(?i)I\'ll (help you|do that|get that for you|take care of that)', '', text)
-        text = re.sub(r'(?i)(sure|certainly|of course|absolutely|definitely|no problem)', '', text)
-        text = re.sub(r'(?i)I\'d be happy to', '', text)
-        text = re.sub(r'(?i)Let me', '', text)
-        text = re.sub(r'(?i)Here\'s', '', text)
-        text = re.sub(r'(?i)For you', '', text)
+    # Remove redundant confirmations and verbose phrases
+    text = re.sub(r'(?i)I\'ll (help you|do that|get that for you|take care of that)', '', text)
+    text = re.sub(r'(?i)(sure|certainly|of course|absolutely|definitely|no problem)', '', text)
+    text = re.sub(r'(?i)I\'d be happy to', '', text)
+    text = re.sub(r'(?i)Let me', '', text)
+    text = re.sub(r'(?i)Here\'s', '', text)
+    text = re.sub(r'(?i)For you', '', text)
     
     # Remove any leading/trailing whitespace
     text = text.strip()
@@ -118,25 +111,7 @@ class AgentInterface:
             print("Initializing agent graph...")
             self.graph_ctx = make_graph()
             self.graph = await self.graph_ctx.__aenter__()
-            
-            # Find and set the callback for the hang_up tool
-            try:
-                # Import the global hang_up_tool_instance
-                from agent import hang_up_tool_instance
-                
-                if hang_up_tool_instance is not None:
-                    # Set the callback directly on the instance
-                    hang_up_tool_instance.set_callback(self.hang_up)
-                    print("Hang Up tool callback connected successfully")
-                else:
-                    print("WARNING: Hang Up tool instance not found, hang-up functionality will not work")
-            except ImportError:
-                print("ERROR importing hang_up_tool_instance - hang-up functionality will not work")
-            except Exception as e:
-                print(f"ERROR setting hang up callback: {e}")
-                import traceback
-                traceback.print_exc()
-            
+
             print("Agent interface initialized successfully")
             return True
         except Exception as e:
@@ -169,16 +144,6 @@ class AgentInterface:
                     print(f"Updated client reference: {self._last_client_address}")
                 else:
                     print("Updated client reference but no remote_address attribute")
-
-        # Check if this is a hang-up command directly from the user
-        if transcription.text and any(term in transcription.text.lower() for term in [
-            "hang up", "end call", "disconnect", "goodbye", "bye", "end the call", "that's all"
-        ]):
-            print(f"Direct hang-up command detected: '{transcription.text}'")
-            if self.current_client:
-                # Hang up immediately without going through the agent
-                await self.hang_up("Thanks for the conversation. Goodbye!")
-                return ""
             
         # Add the new user message to conversation history
         user_message = HumanMessage(content=transcription.text)
@@ -191,152 +156,45 @@ class AgentInterface:
         # Create input state with the full conversation history
         input_state = AgentState(messages=self.conversation_history)
         
+        # Process the input and get response
+        result = await self.graph.ainvoke(input_state)
+
+        # Check if the graph has ended (reached the END node)
+        # This is determined by examining the result structure
+        graph_has_ended = False
+        if result and "messages" in result and result["messages"] and len(result["messages"]) > 0:
+            # If the graph has reached the END node, the last message is the final response
+            # We'll detect this by checking if there are no more actions to take (no tool calls)
+            last_message = result["messages"][-1]
+            if hasattr(last_message, "content"):
+                # If the message has content but no tool_calls, it's likely the end
+                if not (hasattr(last_message, "tool_calls") and last_message.tool_calls):
+                    # Only mark as ended if the response doesn't end with a question
+                    # This ensures we don't hang up when the agent asks a question
+                    response_content = last_message.content.strip()
+                    if not response_content.endswith('?'):
+                        graph_has_ended = True
+                        print("Graph has reached the END node - will hang up silently after response")
+                    else:
+                        print("Graph has reached END node but response ends with a question - will NOT hang up")
+
+        # Extract the text response from structured output
         response_text = ""
-        last_chunk_time = time.time()
-        # Track if we've gotten enough content to consider this a complete response
-        has_sufficient_content = False
-        should_end_conversation = False
-        tool_result_processed = False  # Track if we've processed a tool result
-        
-        # Process the input and collect response
-        async for chunk in self.graph.astream(input_state, stream_mode=["messages", "values"]):
-            try:
-                # Each chunk is a tuple (stream_type, data) when using multiple stream modes
-                if isinstance(chunk, tuple) and len(chunk) == 2:
-                    stream_type, data = chunk
-                    
-                    # Check for the should_end_conversation flag in values stream
-                    if stream_type == "values" and isinstance(data, dict):
-                        if "should_end_conversation" in data and data["should_end_conversation"]:
-                            print("DEBUG: Agent indicated conversation should end")
-                            should_end_conversation = True
-                    
-                    # Handle message chunks (LLM token streaming)
-                    if stream_type == "messages" and isinstance(data, tuple) and len(data) == 2:
-                        message_chunk, metadata = data
-                        
-                        # Extract node name
-                        node_name = metadata.get("langgraph_node", "")
-                        
-                        # Collect content from agent node
-                        if node_name == "agent" and hasattr(message_chunk, 'content') and message_chunk.content:
-                            # Check if this is likely a verification response (very short after a tool call)
-                            # If tool verification responses are getting repeated, we should limit them
-                            current_time = time.time()
-                            new_content = message_chunk.content
-                            
-                            # Check if the response mentions verification terms we want to avoid
-                            verification_terms = ["tool result", "tool returned", "i found", "the result shows", "according to the tool"]
-                            contains_verification_terms = any(term in new_content.lower() for term in verification_terms)
-                            
-                            # Detect if this is a verification response about search results
-                            is_search_verification = False
-                            if "search" in new_content.lower() and any(term in new_content.lower() for term in ["query", "found", "results", "refine"]):
-                                is_search_verification = True
-                                # For search verifications, we want to include them fully
-                                print("Detected search verification response")
-                            
-                            # Only add the content if it's not a duplicate of what we already have
-                            # Always include search verification responses
-                            # Skip responses that are just verifying the tool worked
-                            if ((not response_text or not new_content.strip() in response_text) and 
-                                (not contains_verification_terms or is_search_verification)):
-                                response_text += new_content
-                                last_chunk_time = current_time
-                                
-                                # Consider the response sufficient if we have a reasonable amount of content
-                                if len(response_text) > 15:
-                                    has_sufficient_content = True
-                            elif current_time - last_chunk_time > 3.0 and has_sufficient_content:
-                                # If we're getting duplicates and have sufficient content, stop processing
-                                print("Detected potential response loop, stopping processing")
-                                break
-            except Exception as e:
-                print(f"Error processing chunk: {e}")
-        
-        # Don't return the text - we'll process and stream it directly
-        # Instead, return an empty string to indicate we're handling it ourselves
-        if not response_text.strip():
-            # If no response, return a fallback message
-            return "I'm sorry, I couldn't process that request."
-        
-        # Check for the ##END## marker which indicates the conversation should end
-        should_end_with_marker = "##END##" in response_text
-        
-        # Remove the ##END## marker from the response if present
-        if should_end_with_marker:
-            response_text = response_text.replace("##END##", "").strip()
-            should_end_conversation = True
-            print("Found ##END## marker - will end conversation after response")
-        
-        # Clean the response text to make it more suitable for TTS
+
+        if result and "messages" in result and result["messages"] and len(result["messages"]) > 0:
+            last_message = result["messages"][-1]
+            if hasattr(last_message, "content"):
+                response_text = last_message.content
+
+        # Clean the response for TTS
         cleaned_response = clean_text_for_tts(response_text.strip())
         print(f"Original response length: {len(response_text)}, Cleaned response length: {len(cleaned_response)}")
-        
-        # Check if this was a weather or simple information query - if so, force end conversation
-        weather_keywords = ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'climate', 'hot', 'cold']
-        info_keywords = ['time', 'date', 'when is', 'what time', 'what day']
-        
-        if transcription.text and (
-            any(keyword in transcription.text.lower() for keyword in weather_keywords) or
-            any(keyword in transcription.text.lower() for keyword in info_keywords)
-        ):
-            print("Detected weather or time query - will end conversation after response")
-            should_end_conversation = True
         
         # Add the agent's response to conversation history
         self.conversation_history.append(AIMessage(content=cleaned_response))
         
-        # If the agent determined the conversation should end, hang up after delivering the message
-        if should_end_conversation:
-            print(f"Agent determined conversation should end: '{cleaned_response}'")
-            # We will hang up after delivering the agent's response message
-            
-        # If the response seems to be repeating (potential loop), truncate it
-        # Look for repeated phrases that might indicate a loop
-        words = cleaned_response.split()
-        detected_loop = False
-        if len(words) > 10:
-            # Check for repeating patterns
-            for pattern_length in range(3, min(10, len(words) // 2)):
-                for i in range(len(words) - pattern_length * 2):
-                    pattern1 = ' '.join(words[i:i+pattern_length])
-                    pattern2 = ' '.join(words[i+pattern_length:i+pattern_length*2])
-                    if pattern1 == pattern2:
-                        print(f"Detected repeating pattern: '{pattern1}', truncating response")
-                        # Truncate to just before the repetition
-                        cleaned_response = ' '.join(words[:i+pattern_length])
-                        detected_loop = True
-                        break
-                if detected_loop:
-                    break
-        
-        # If we detected a loop and we have a client, consider hanging up to prevent bad UX
-        if detected_loop and self.audio_server and current_client:
-            loop_count = getattr(self, '_loop_count', 0) + 1
-            self._loop_count = loop_count
-            
-            # If we've detected multiple loops, hang up automatically
-            if loop_count >= 2:
-                print(f"Multiple response loops detected ({loop_count}), hanging up automatically")
-                await self.hang_up("I seem to be having trouble. Let's end the call for now.")
-                return ""
-        
-        # Check if the agent wants to hang up based on its response
-        if any(term in cleaned_response.lower() for term in [
-            "goodbye", "bye", "hang up", "end call", "end the call", "that's all"
-        ]):
-            print(f"Agent response indicates hang-up: '{cleaned_response}'")
-            if self.current_client:
-                # We already have the goodbye message in the response
-                await self.hang_up(cleaned_response)
-                return ""
-        
         # Split the response into sentences for streaming
         # This regex splits on sentence boundaries while preserving punctuation
-        import re
-        # This pattern looks for sentence endings (., !, ?) followed by a space or end of string
-        # It's careful not to split on periods in numbers, abbreviations, etc.
         sentences = re.split(r'(?<=[.!?])\s+', cleaned_response)
         
         # Filter out empty sentences
@@ -347,10 +205,9 @@ class AgentInterface:
             
         print(f"Splitting response into {len(sentences)} sentences for streaming")
         
-        # Use either the stored current client or the one from the instance
+        # Process each sentence with TTS and send it to the client
         client_to_use = current_client or self.current_client
         
-        # Process each sentence with TTS and send it to the client
         if self.audio_server and client_to_use:
             try:
                 # Process sentences in batches for more natural pauses
@@ -409,12 +266,16 @@ class AgentInterface:
                 
                 print(f"Finished streaming all audio batches")
                 
-                # If the agent determined the conversation should end, hang up now
-                if should_end_conversation:
-                    print("Hanging up as agent determined conversation should end")
-                    # Use the final response as the hang-up message
-                    await self.hang_up(cleaned_response)
-                    return ""
+                # If the graph has reached its end node, hang up silently after sending the response
+                if graph_has_ended:
+                    # Double-check that the cleaned response doesn't end with a question mark
+                    # as TTS cleaning might have modified the content
+                    if not cleaned_response.strip().endswith('?'):
+                        print("Hanging up silently as graph has reached the END node")
+                        await self.hang_up("")  # Empty string means no goodbye message
+                        return ""
+                    else:
+                        print("Not hanging up as final response ends with a question")
                 
             except Exception as e:
                 print(f"Error streaming TTS: {e}")
@@ -444,6 +305,7 @@ class AgentInterface:
         
         Args:
             reason: The reason for hanging up (will be spoken to the user)
+                   If empty, no message will be played before hanging up
             
         Returns:
             str: A message indicating success or failure
@@ -459,21 +321,22 @@ class AgentInterface:
             print(f"No active client connection (last known client: {self._last_client_address})")
             return "Failed to hang up: No active client connection"
         
-        # Create a friendly goodbye message if one wasn't provided
-        goodbye_message = reason
-        if not goodbye_message:
-            goodbye_message = "Thanks for the conversation. Goodbye!"
-        
-        # Ensure the goodbye message is concise
-        if len(goodbye_message) > 50:
-            # If message is too long, truncate it and just keep the goodbye part
-            goodbye_message = "Thanks for the conversation. Goodbye!"
-        
-        # Make sure the message ends with a clear "goodbye" so users know the call is ending
-        if not any(term in goodbye_message.lower() for term in ["goodbye", "bye", "end", "hang up"]):
-            goodbye_message += " Goodbye!"
+        # Skip the goodbye message entirely if reason is empty
+        # This allows for silent hang-ups when requested
+        goodbye_message = ""
+        if reason:
+            # Create a friendly goodbye message if one was provided
+            goodbye_message = reason
+            # Ensure the goodbye message is concise
+            if len(goodbye_message) > 50:
+                # If message is too long, truncate it and just keep the goodbye part
+                goodbye_message = "Thanks for the conversation. Goodbye!"
             
-        print(f"Attempting to hang up with message: '{goodbye_message}'")
+            # Make sure the message ends with a clear "goodbye" so users know the call is ending
+            if not any(term in goodbye_message.lower() for term in ["goodbye", "bye", "end", "hang up"]):
+                goodbye_message += " Goodbye!"
+            
+        print(f"Attempting to hang up with message: '{goodbye_message if goodbye_message else '[silent hang up]'}'")
         
         # First clear the client reference to prevent any further processing
         # Store it temporarily for the hang-up call
@@ -502,18 +365,6 @@ class AgentInterface:
             # Restore client reference if hang-up failed
             self.current_client = temp_client
             return f"Failed to hang up the call: {e}"
-
-async def test_hang_up(agent_interface):
-    """Test the hang up functionality directly"""
-    print("Testing hang up functionality...")
-    
-    if not agent_interface.current_client:
-        print("No active client connected, cannot test hang up")
-        return False
-        
-    result = await agent_interface.hang_up("This is a test of the hang up functionality. Goodbye!")
-    print(f"Hang up test result: {result}")
-    return "Call ended successfully" in result
 
 async def main(args):
     """Main entry point"""
@@ -576,14 +427,7 @@ async def main(args):
         while True:
             cmd = await loop.run_in_executor(None, input, "\nAdmin command (or press Enter to skip): ")
             
-            if cmd.lower() == "test_hangup":
-                # Wait for a client to connect first
-                if not agent_interface.current_client:
-                    print("No client connected yet. Connect a client before testing hang up.")
-                else:
-                    # Test hang up functionality
-                    await test_hang_up(agent_interface)
-            elif cmd.lower() == "exit" or cmd.lower() == "quit":
+            if cmd.lower() == "exit" or cmd.lower() == "quit":
                 print("Exiting...")
                 shutdown_event.set()
                 break
