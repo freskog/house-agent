@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 from langgraph.graph import StateGraph, START, END
-from typing import Annotated, List, Dict, Any
+from typing import Annotated, List, Dict, Any, Optional
+from typing_extensions import TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from langgraph.graph.message import add_messages, AnyMessage
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.tools import BaseTool
+from langsmith import traceable, Client
+from langsmith.wrappers import wrap_openai
 
 from pydantic import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -18,56 +21,29 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime
 import httpx
+import openai
+import uuid
+import re
 
 # Load environment variables
 load_dotenv(override = True)
 
-# Global tool reference for callback registration
-hang_up_tool_instance = None
+# Initialize LangSmith client
+langsmith_client = Client()
+
+# Define structured response for agent
+class AgentResponse(BaseModel):
+    """Structure for agent's conversation response"""
+    content: str = Field(description="The response content to display to the user")
+    should_end: bool = Field(description="Whether the conversation should end", default=False)
 
 # Define state
-class AgentState(BaseModel):
-    messages: Annotated[List[AnyMessage], add_messages]
-    should_end_conversation: bool = False
+class AgentState(TypedDict):
+    messages: Annotated[List[SystemMessage | HumanMessage | AIMessage | ToolMessage], add_messages]
+    should_end_conversation: bool
 
-# Define a tool for hanging up the call
-class HangUpTool(BaseTool):
-    name: str = "hang_up"
-    description: str = (
-        "End the conversation and hang up the call. Use this when the conversation has naturally concluded, "
-        "all questions have been answered, or the user has requested to end the call. "
-        "Provide a friendly farewell message that will be spoken to the user before hanging up."
-    )
-    
-    # Define the input schema
-    class HangUpInput(BaseModel):
-        reason: str = Field(
-            description=(
-                "A friendly goodbye message to say to the user before hanging up. "
-                "For example: 'Thanks for chatting, goodbye!' or 'I'll let you go now, have a great day!'"
-            )
-        )
-    
-    args_schema: type[BaseModel] = HangUpInput
-    
-    # Reference to the hang_up method
-    _hang_up_callback = None
-    
-    def set_callback(self, callback):
-        """Set the callback function to hang up the call"""
-        self._hang_up_callback = callback
-        
-    async def _arun(self, reason: str) -> str:
-        """Run the hang up tool"""
-        if self._hang_up_callback is None:
-            return "Unable to hang up: No callback function set"
-            
-        # Call the hang_up callback
-        return await self._hang_up_callback(reason)
-    
-    def _run(self, reason: str) -> str:
-        """Synchronous run - this won't be used since we'll use arun"""
-        raise NotImplementedError("This tool only supports async execution")
+# Create shared variables to store music info
+current_music_info = {"current_song": "Nothing playing", "mcp_tools": None}
 
 # Load environment variables
 ha_api_key = os.getenv("HA_API_KEY")
@@ -109,8 +85,11 @@ async def get_current_song(music_tools):
     
     return current_song
 
-# Create shared variables to store music info
-current_music_info = {"current_song": "Nothing playing", "mcp_tools": None}
+# Utility function to ensure tool messages have required fields
+def ensure_valid_tool_message(message):
+    if isinstance(message, ToolMessage) and not hasattr(message, "tool_call_id"):
+        message.tool_call_id = str(uuid.uuid4())
+    return message
 
 # Define your graph constructor as an async context manager
 @asynccontextmanager
@@ -151,23 +130,13 @@ async def make_graph():
         mcp_tools = client.get_tools()
         current_music_info["mcp_tools"] = mcp_tools
         
-        # Create the hang up tool
-        hang_up_tool = HangUpTool()
-        
-        # Store it in a variable we can access later for callback setup
-        # We need to access this specific instance later
-        global hang_up_tool_instance
-        hang_up_tool_instance = hang_up_tool
-        
-        # Combine MCP tools with Tavily and hang_up tool
+        # Combine MCP tools with Tavily
         all_tools = [*mcp_tools]
         if tavily_tool:
             all_tools.append(tavily_tool)
             print(f"Added Tavily tool to the agent's tools list")
         
-        # Add the hang_up tool
-        all_tools.append(hang_up_tool)
-        print(f"Added Hang Up tool to the agent's tools list. Total tools: {len(all_tools)}")
+        print(f"Total tools available: {len(all_tools)}")
 
         # Get homeassistant prompt
         system_message = await client.get_prompt("homeassistant", "Assist", None)
@@ -194,44 +163,223 @@ Additional Instructions:
 7. For music playback, start playing appropriate music without lengthy explanations
 8. You know that "{current_song}" is currently playing (if anything)
 9. IMPORTANT: Since your responses will be read aloud via text-to-speech, avoid using any formatting or special characters
-10. DEFAULT BEHAVIOR: After answering a user question with a tool, automatically end the conversation using the hang_up tool UNLESS:
-   - The user explicitly asked a follow-up question
-   - Your response requires further input from the user (like clarification or confirmation)
-   - You need more information to complete the task
-11. For search tools: When a search fails to find relevant information, state what you searched for, briefly summarize what was found (or not found), and ask if the user wants to refine the search instead of automatically trying again.
-12. NEVER respond with phrases like "I found that..." or "According to the tool..." - just give the information directly
+10. For search tools: When a search fails to find relevant information, state what you searched for, briefly summarize what was found (or not found), and ask if the user wants to refine the search instead of automatically trying again.
+11. NEVER respond with phrases like "I found that..." or "According to the tool..." - just give the information directly
+
+IMPORTANT: When using Home Assistant tools like HassTurnOn or HassTurnOff, you MUST specify ALL required parameters:
+- domain: The type of device (e.g., "light", "switch", "climate", "media_player")
+- service: The action to perform (e.g., "turn_on", "turn_off", "toggle")
+- entity_id: The specific entity to target (e.g., "light.hallway", "switch.kitchen")
+
+Examples of correct tool use:
+- HassTurnOn(domain="light", service="turn_on", entity_id="light.hallway")
+- HassTurnOff(domain="switch", service="turn_off", entity_id="switch.kitchen")
+- HassTurnOn(domain="media_player", service="turn_on", entity_id="media_player.living_room_tv")
+
+The domain should match the type of entity being controlled (e.g., "light" for light entities, "switch" for switches).
+You can determine the appropriate domain from the entity_id prefix (e.g., "light." indicates domain="light").
+
+NEVER call a Home Assistant tool without specifying ALL required parameters.
+ALWAYS examine the system message to find valid entity IDs for the devices the user wants to control.
 
 Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form."""
 
-        # Create LLM
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Create the model with tool-calling enabled
+        # Use ChatOpenAI directly with LangSmith tracing - it will automatically be traced
+        llm = ChatOpenAI(
+            streaming=True,
+            temperature=0,
+            model="gpt-4o-mini",
+        )
         
-        # Bind tools to LLM
-        llm_with_tools = llm.bind_tools(all_tools)
+        # Create a mapping from function names to tool names
+        function_to_tool_name = {}
+        tool_schemas = []
         
-        # Create graph
-        builder = StateGraph(AgentState)
+        for tool in all_tools:
+            if hasattr(tool, "name") and hasattr(tool, "description"):
+                # Create basic schema with proper function name mapping
+                tool_name = tool.name
+                
+                # Map mcp tools to their OpenAI-friendly names
+                if tool_name.startswith("homeassistant_turn_on"):
+                    function_name = "HassTurnOn"
+                elif tool_name.startswith("homeassistant_turn_off"):
+                    function_name = "HassTurnOff"
+                elif tool_name.startswith("homeassistant_toggle"):
+                    function_name = "HassToggle"
+                elif tool_name.startswith("homeassistant_"):
+                    # Convert other homeassistant tools to camel case format (e.g., "Hass" + CamelCase)
+                    service_name = tool_name.replace("homeassistant_", "")
+                    function_name = "Hass" + "".join(x.capitalize() for x in service_name.split("_"))
+                else:
+                    function_name = tool_name
+                    
+                # Store in mapping
+                function_to_tool_name[function_name] = tool_name
+                
+                # Create tool schema
+                schema = {
+                    "type": "function", 
+                    "function": {
+                        "name": function_name,
+                        "description": tool.description
+                    }
+                }
+                
+                # Special handling for Tavily tool which has a problematic schema
+                if tool_name == "tavily_search_results" or tool_name == "tavily_search_results_json":
+                    schema["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query to look up"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                # Special handling for HomeAssistant services (turn_on, turn_off, toggle, etc.)
+                elif (
+                    tool_name.startswith("homeassistant_") and 
+                    any(service in tool_name for service in ["turn_on", "turn_off", "toggle"])
+                ):
+                    schema["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {
+                            "domain": {
+                                "type": "string",
+                                "description": "REQUIRED: The domain of the entity (e.g., 'light', 'switch', 'climate', 'media_player')"
+                            },
+                            "service": {
+                                "type": "string",
+                                "description": "REQUIRED: The service to call (e.g., 'turn_on', 'turn_off', 'toggle')"
+                            },
+                            "entity_id": {
+                                "type": "string",
+                                "description": "REQUIRED: The specific entity_id to target. Must be a valid entity ID from Home Assistant."
+                            }
+                        },
+                        "required": ["domain", "service", "entity_id"]
+                    }
+                # Add fallback handling for any other HomeAssistant tools
+                elif tool_name.startswith("homeassistant_"):
+                    schema["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {
+                            "domain": {
+                                "type": "string",
+                                "description": "REQUIRED: The domain of the entity (e.g., 'light', 'switch', 'climate', 'media_player')"
+                            },
+                            "service": {
+                                "type": "string",
+                                "description": "REQUIRED: The service to call"
+                            },
+                            "entity_id": {
+                                "type": "string",
+                                "description": "REQUIRED: The specific entity_id to target in Home Assistant. Must be a valid entity ID."
+                            }
+                        },
+                        "required": ["domain", "service", "entity_id"]
+                    }
+                # Standard handling for other tools
+                elif hasattr(tool, "args_schema"):
+                    parameters = {"type": "object", "properties": {}, "required": []}
+                    if hasattr(tool.args_schema, "schema") and callable(tool.args_schema.schema):
+                        schema_dict = tool.args_schema.schema()
+                        if "properties" in schema_dict:
+                            parameters["properties"] = schema_dict["properties"]
+                        if "required" in schema_dict:
+                            parameters["required"] = schema_dict["required"]
+                    schema["function"]["parameters"] = parameters
+                
+                tool_schemas.append(schema)
         
-        # Define agent node function with updated system message each time
+        # Create a custom ToolExecutor that maps the OpenAI function names to the actual tool names
+        class CustomToolExecutor(ToolNode):
+            def __init__(self, tools, mapping):
+                super().__init__(tools)
+                self.function_to_tool_name = mapping
+                
+                # Store tool names for quick lookup
+                self.available_tool_names = {tool.name for tool in tools if hasattr(tool, 'name')}
+                print(f"Available tool names in CustomToolExecutor: {self.available_tool_names}")
+                
+            def invoke(self, state):
+                # Get the last message from the state
+                if not state["messages"]:
+                    return state
+                    
+                last_message = state["messages"][-1]
+                
+                # Check if the message has tool calls
+                if (
+                    isinstance(last_message, AIMessage) 
+                    and hasattr(last_message, "tool_calls") 
+                    and last_message.tool_calls
+                ):
+                    # Process each tool call and translate function names
+                    for tool_call in last_message.tool_calls:
+                        if "name" in tool_call:
+                            original_name = tool_call["name"]
+                            args = tool_call.get("args", {})
+                            
+                            # Debug: Print what's being sent to help identify parameter name issues
+                            print(f"DEBUG: Tool call '{original_name}' with args: {args}")
+                            
+                            # Check if this is a direct HomeAssistant tool (HassTurnOn, etc.)
+                            if original_name.startswith("Hass") and original_name in self.available_tool_names:
+                                # Already the correct name, no mapping needed
+                                mapped_name = original_name
+                                print(f"DEBUG: Direct HA tool detected: {mapped_name}")
+                                
+                                # No parameter transformation needed now - the LLM provides all required parameters
+                                
+                            elif original_name in self.function_to_tool_name:
+                                # Map the OpenAI function name to the actual tool name
+                                mapped_name = self.function_to_tool_name[original_name]
+                                print(f"DEBUG: Mapped tool name: {original_name} -> {mapped_name}")
+                            else:
+                                # No mapping available, use original name
+                                mapped_name = original_name
+                                print(f"DEBUG: No mapping for {original_name}, using as-is")
+                            
+                            # Set the mapped name
+                            tool_call["name"] = mapped_name
+                
+                # Invoke the standard ToolNode with the updated state
+                return super().invoke(state)
+        
+        # Use the custom tool executor with name mapping
+        tool_node = CustomToolExecutor(all_tools, function_to_tool_name)
+        
+        # Bind the tools to the LLM using the proper schema
+        llm = llm.bind(tools=tool_schemas)
+        
+        # Create the agent function that processes messages and returns a new message
+        @traceable(name="Agent", run_type="chain")
         def agent(state: AgentState):
-            messages = state.messages
+            # Process messages to ensure all ToolMessages have required fields
+            processed_messages = []
+            for msg in state["messages"]:
+                processed_messages.append(ensure_valid_tool_message(msg))
+            
+            messages = processed_messages
             
             # Add system message if it's the first interaction
-            if len(messages) == 1 and messages[0].type == "human":
+            if len(messages) == 1 and isinstance(messages[0], HumanMessage):
                 # Get the latest music info for the system message
                 latest_song = current_music_info["current_song"]
                 
-                # Create updated system message with current song
+                # Create updated system message with current song and date
+                current_date = datetime.now().strftime("%B %d, %Y")
                 updated_system_message = enhanced_system_message.replace(
                     f"Currently playing: {current_song}",
                     f"Currently playing: {latest_song}"
-                ).replace(
-                    f'You know that "{current_song}" is currently playing',
-                    f'You know that "{latest_song}" is currently playing'
                 )
                 
                 messages = [
-                    {"role": "system", "content": updated_system_message},
+                    SystemMessage(content=updated_system_message),
                     *messages
                 ]
             
@@ -243,9 +391,9 @@ Remember that as a voice assistant, your responses should be much shorter than y
                 second_last_message = messages[-2]
                 
                 # If the last message is from the user and the second last was from the agent
-                if (last_message.type == "human" and
-                    (second_last_message.type == "ai" or 
-                     (second_last_message.type == "tool" and hasattr(second_last_message, '_verified') and second_last_message._verified))):
+                if (isinstance(last_message, HumanMessage) and
+                    (isinstance(second_last_message, AIMessage) or 
+                     (isinstance(second_last_message, ToolMessage) and hasattr(second_last_message, '_verified') and second_last_message._verified))):
                     should_analyze_conversation_end = True
                     
                     # Check if this is likely a simple information query - be more aggressive about ending
@@ -264,7 +412,7 @@ Remember that as a voice assistant, your responses should be much shorter than y
                     
                     # Look for tool usage in previous messages
                     had_tool_use = any(
-                        hasattr(msg, 'type') and msg.type == 'tool' 
+                        isinstance(msg, ToolMessage)
                         for msg in prev_messages
                     )
                     
@@ -273,15 +421,15 @@ Remember that as a voice assistant, your responses should be much shorter than y
                         # Skip the analysis and just end it
                         print("DEBUG: Detected information query after tool use - conversation will end")
                         goodbye_message = "Thanks for your question. Is there anything else you need help with?"
-                        return AgentState(
-                            messages=[AIMessage(content=goodbye_message)],
-                            should_end_conversation=True
-                        )
+                        return {
+                            "messages": [AIMessage(content=goodbye_message)],
+                            "should_end_conversation": True
+                        }
             
             # Check if the previous message is a ToolMessage indicating a tool result
             # Only do verification if we haven't already verified this tool result
             should_verify = False
-            if len(messages) >= 2 and hasattr(messages[-1], 'type') and messages[-1].type == 'tool':
+            if len(messages) >= 2 and isinstance(messages[-1], ToolMessage):
                 tool_message = messages[-1]
                 
                 # Check if this tool result has already been verified
@@ -308,7 +456,7 @@ Remember that as a voice assistant, your responses should be much shorter than y
                 
                 # Also check the user's question to detect weather queries regardless of tool name
                 weather_keywords = ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'climate', 'hot', 'cold']
-                previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                previous_human_msg = next((msg for msg in reversed(messages) if isinstance(msg, HumanMessage)), None)
                 
                 if previous_human_msg and any(keyword in previous_human_msg.content.lower() for keyword in weather_keywords):
                     is_high_priority_end = True
@@ -317,7 +465,7 @@ Remember that as a voice assistant, your responses should be much shorter than y
                 if not already_verified:
                     # Get the previous human message for context if not already fetched
                     if not previous_human_msg:
-                        previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                        previous_human_msg = next((msg for msg in reversed(messages) if isinstance(msg, HumanMessage)), None)
                     
                     # Make sure this isn't our verification prompt
                     if previous_human_msg and not previous_human_msg.content.startswith("The tool returned the above result"):
@@ -334,12 +482,6 @@ Remember that as a voice assistant, your responses should be much shorter than y
                             f"Be EXTREMELY concise, using just a few words. "
                             f"For search tools that didn't find relevant information, briefly summarize what was found and "
                             f"ask if the user would like to refine the search query."
-                            f"\n\nAfter providing this answer, the conversation should automatically end UNLESS:"
-                            f"\n- Your response explicitly requires more input from the user"
-                            f"\n- The tool didn't find what the user needed and you're asking to refine"
-                            f"\n- The user specifically asked for a multi-part answer or follow-up"
-                            f"{end_suggestion}"
-                            f"\n\nIn all other cases, add ##END## at the end of your response."
                         )
                         # Add this as a human message
                         messages.append(HumanMessage(content=verification_prompt))
@@ -363,51 +505,42 @@ Remember that as a voice assistant, your responses should be much shorter than y
                     "Output ONLY a single word: 'end' if the conversation should end, or 'continue' if it should continue."
                 )
                 
-                # Add the analysis prompt as a hidden message to the LLM
+                # Add the analysis prompt as a hidden message to the LLM - create fresh message objects
                 analysis_messages = [
-                    {"role": "system", "content": "You are analyzing if a conversation has naturally concluded."},
-                    *last_exchanges,
-                    HumanMessage(content=analysis_prompt)
+                    SystemMessage(content="You are analyzing if a conversation has naturally concluded."),
                 ]
+                
+                # Add simplified versions of the last exchanges
+                for msg in last_exchanges:
+                    if isinstance(msg, HumanMessage):
+                        analysis_messages.append(HumanMessage(content=msg.content))
+                    elif isinstance(msg, AIMessage):
+                        analysis_messages.append(AIMessage(content=msg.content))
+                    elif isinstance(msg, ToolMessage):
+                        analysis_messages.append(ToolMessage(content=msg.content, tool_call_id=getattr(msg, "tool_call_id", ""), name=getattr(msg, "name", "")))
+                
+                # Add the analysis prompt
+                analysis_messages.append(HumanMessage(content=analysis_prompt))
                 
                 # Get the LLM's analysis
                 analysis_response = llm.invoke(analysis_messages)
                 
                 # Determine if conversation should end based on analysis
-                should_end = False
+                should_end_conversation = False
                 if hasattr(analysis_response, 'content'):
                     content = analysis_response.content.lower().strip()
                     if content == 'end' or 'end' in content.split():
-                        should_end = True
+                        should_end_conversation = True
                         print("DEBUG: LLM determined conversation should end")
-                
-                # If the conversation should end, use the hang up tool
-                if should_end:
-                    # Generate a friendly goodbye message
-                    goodbye_prompt = "Generate a very brief, friendly goodbye message to end the conversation naturally."
-                    goodbye_messages = [
-                        {"role": "system", "content": "Generate a brief, friendly goodbye message."},
-                        *last_exchanges,
-                        HumanMessage(content=goodbye_prompt)
-                    ]
-                    
-                    goodbye_response = llm.invoke(goodbye_messages)
-                    goodbye_message = "Thanks for the conversation. Goodbye!"
-                    
-                    if hasattr(goodbye_response, 'content'):
-                        goodbye_message = goodbye_response.content
-                        # Ensure it's concise
-                        if len(goodbye_message) > 50:
-                            goodbye_message = "Thanks for the conversation. Goodbye!"
-                
-                    # Return the response with the should_end_conversation flag set
-                    return AgentState(
-                        messages=[AIMessage(content=goodbye_message)],
-                        should_end_conversation=True
-                    )
+                        
+                        # Set flags to end the conversation
+                        return {
+                            "messages": [],
+                            "should_end_conversation": True
+                        }
             
             # Normal processing
-            response = llm_with_tools.invoke(messages)
+            response = llm.invoke(messages)
             
             # If this was a verification response, ensure it's extremely short
             if should_verify and hasattr(response, 'content'):
@@ -417,32 +550,108 @@ Remember that as a voice assistant, your responses should be much shorter than y
                     shortened = content[:77] + "..."
                     response.content = shortened
             
-            # Check for ##END## marker which indicates conversation should end
+            # For tool messages, ensure they have required fields
+            if isinstance(response, ToolMessage) and not hasattr(response, "tool_call_id"):
+                response.tool_call_id = str(uuid.uuid4())
+            
+            # Automatically detect if the conversation should end based on patterns
             should_end_conversation = False
-            if hasattr(response, 'content') and "##END##" in response.content:
-                # Remove the marker but set the flag
-                response.content = response.content.replace("##END##", "").strip()
-                should_end_conversation = True
-                print("DEBUG: Found ##END## marker in response - conversation will end")
+            
+            # Check for common one-off command patterns
+            if len(messages) >= 2:
+                # Get the last human message
+                last_human_msg = next((msg for msg in reversed(messages) if isinstance(msg, HumanMessage) and not msg.content.startswith("The tool returned")), None)
                 
-            return AgentState(
-                messages=[response],
-                should_end_conversation=should_end_conversation
-            )
+                # Check if there was a tool message after this human message
+                if last_human_msg:
+                    tool_after_human = any(
+                        isinstance(msg, ToolMessage) and 
+                        messages.index(msg) > messages.index(last_human_msg)
+                        for msg in messages
+                    )
+                    
+                    # Check if this is a one-off command
+                    if tool_after_human and hasattr(response, 'content'):
+                        # Common command patterns in user queries
+                        command_patterns = [
+                            'turn on', 'turn off', 'switch on', 'switch off', 'dim', 'brighten',
+                            'play', 'pause', 'stop', 'skip', 'next', 'previous', 'volume', 
+                            'set temperature', 'set to', 'toggle'
+                        ]
+                        
+                        # If user message was a simple command and we just executed it
+                        if any(pattern in last_human_msg.content.lower() for pattern in command_patterns):
+                            should_end_conversation = True
+                            print("DEBUG: Detected one-off command pattern - ending conversation")
+            
+            # Create a new state with updated messages
+            new_messages = []
+            if isinstance(response, AIMessage):
+                new_messages.append(response)
+            else:
+                # Convert to AIMessage if it's not already
+                if hasattr(response, 'content'):
+                    new_messages.append(AIMessage(content=response.content))
+                else:
+                    new_messages.append(AIMessage(content=str(response)))
+            
+            # Return the structured output with proper state information
+            return {
+                "messages": new_messages,
+                "should_end_conversation": should_end_conversation
+            }
         
-        # Add nodes to graph
+        # Add tool_node and condition
+        tool_node = CustomToolExecutor(all_tools, function_to_tool_name)
+        
+        # Use trace decorator for the tools condition function
+        @traceable(name="Tools Condition", run_type="chain")
+        def should_continue(state):
+            # Get the last message
+            last_message = state["messages"][-1] if state["messages"] else None
+            
+            # Check if we should end the conversation
+            if state["should_end_conversation"]:
+                return END
+                
+            # Check if there are tool calls in the last message
+            if last_message and isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tools"
+                
+            # If no tool calls, move to the end
+            return END
+        
+        # Define a function to add messages to state
+        def add_messages_to_state(state, new_state):
+            """Add messages from new_state to the current state."""
+            if not new_state or "messages" not in new_state or not new_state["messages"]:
+                return state
+                
+            return {
+                "messages": state["messages"] + new_state["messages"],
+                "should_end_conversation": state.get("should_end_conversation", False) or new_state.get("should_end_conversation", False)
+            }
+        
+        # Build the graph with proper node setup
+        builder = StateGraph(AgentState)
         builder.add_node("agent", agent)
+        builder.add_node("tools", tool_node)
         
-        # Use the standard ToolNode with proper error handling
-        builder.add_node("tools", ToolNode(all_tools))
-        
-        # Add edges
+        # Set the edge properties with custom message combiners
         builder.add_edge(START, "agent")
-        builder.add_conditional_edges("agent", tools_condition)
+        builder.add_conditional_edges("agent", should_continue)
         builder.add_edge("tools", "agent")
         
         # Compile and yield the graph
         graph = builder.compile()
+
+        # After getting mcp_tools, add this:
+        homeassistant_turn_on = next((tool for tool in mcp_tools if "turn_on" in tool.name), None)
+        if homeassistant_turn_on:
+            print(f"Turn on tool name: {homeassistant_turn_on.name}")
+            if hasattr(homeassistant_turn_on, "args_schema"):
+                print(f"Turn on tool schema: {homeassistant_turn_on.args_schema.schema()}")
+
         yield graph
 
 async def setup_and_run():
@@ -465,9 +674,16 @@ async def setup_and_run():
                 print(f"Warning: Failed to update music info: {e}")
             
             print("\nAgent: ", end="", flush=True)
-            input_state = AgentState(messages=[HumanMessage(content=user_input)])
+            # Initialize state with all required properties
+            input_state = {
+                "messages": [HumanMessage(content=user_input)], 
+                "should_end_conversation": False
+            }
             
             try:
+                # Track if we should end the conversation
+                should_end = False
+                
                 # Process in streaming mode with error handling
                 async for chunk in graph.astream(input_state, stream_mode=["messages", "values"]):
                     try:
@@ -507,6 +723,10 @@ async def setup_and_run():
                             
                             # Handle values chunks (state updates)
                             elif stream_type == "values" and isinstance(data, dict):
+                                # Check for should_end_conversation flag
+                                if "should_end_conversation" in data:
+                                    should_end = data.get("should_end_conversation", False)
+                                
                                 # Display tool results from the state
                                 if "messages" in data:
                                     messages = data.get("messages", [])
@@ -558,20 +778,37 @@ async def setup_and_run():
                     except httpx.RemoteProtocolError as e:
                         print(f"\n[Connection Error] The server closed the connection unexpectedly. This often happens when music playback starts successfully.")
                         print("\nThe music is playing but the connection was closed.")
-                        break
+                        # Initialize should_end to avoid variable reference errors
+                        should_end = False
                     except Exception as e:
-                        print(f"\n[Error] An error occurred: {e}")
-                        print(f"Error type: {type(e)}")  # Show error type for debugging
+                        print(f"\n[Error] An error occurred while processing: {e}")
+                        import traceback
+                        traceback.print_exc()  # Print full traceback for better debugging
+                        # Try to recover conversation
+                        print("\nLet me try to continue our conversation...")
+                        # Initialize should_end to avoid variable reference errors
+                        should_end = False
+                
+                # If the conversation should end, add a goodbye message
+                if should_end:
+                    print("\nGoodbye! Let me know if you need anything else.")
             
             except httpx.RemoteProtocolError as e:
                 print(f"\n[Connection Error] The server closed the connection unexpectedly. This often happens when music playback starts successfully.")
                 print("\nThe music is playing but the connection was closed.")
+                # Initialize should_end to avoid variable reference errors
+                should_end = False
             except Exception as e:
                 print(f"\n[Error] An error occurred while processing: {e}")
+                import traceback
+                traceback.print_exc()  # Print full traceback for better debugging
                 # Try to recover conversation
                 print("\nLet me try to continue our conversation...")
+                # Initialize should_end to avoid variable reference errors
+                should_end = False
             
             print("\n")
 
 if __name__ == "__main__":
+    print("Running agent...")
     asyncio.run(setup_and_run())
