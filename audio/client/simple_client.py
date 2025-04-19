@@ -262,7 +262,22 @@ class SimpleAudioClient:
                             state = msg["payload"]["state"]
                             is_speech = msg["payload"].get("is_speech", False)
                             
-                            if is_speech:
+                            if state == "hanging_up":
+                                print("📞 Call ending...")
+                                # Stop sending audio when hanging up
+                                self.running = False
+                                # Drain the speaker buffer before disconnecting
+                                if self.speaker_stream:
+                                    self.speaker_stream.stop_stream()
+                                    self.speaker_stream.start_stream()
+                                # Add a small delay to allow any final audio to play
+                                await asyncio.sleep(0.5)
+                                print("📞 Call ended")
+                                # Disconnect immediately to prevent further messages
+                                await self.disconnect()
+                                # Exit the receive loop
+                                return
+                            elif is_speech:
                                 print("🔴 Recording...")
                             elif state == "processing":
                                 print("⏱️ Processing...")

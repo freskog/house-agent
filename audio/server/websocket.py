@@ -612,16 +612,44 @@ class AudioServer:
         # Send message
         await websocket.send(message.json())
         
-    async def send_audio_playback(self, websocket, audio_data: bytes):
-        """Send audio data to client for playback"""
+    async def send_audio_playback(self, websocket, audio_data: bytes, is_hangup_message=False):
+        """Send audio data to client for playback
+        
+        Args:
+            websocket: The client websocket
+            audio_data: The audio data to send
+            is_hangup_message: Whether this is a hangup message (optimizes for faster delivery)
+        """
         try:
             # Debug info about the audio data
-            print(f"Sending audio playback to client: {len(audio_data)} bytes")
+            print(f"Sending audio playback to client: {len(audio_data)} bytes{' (hangup message)' if is_hangup_message else ''}")
             
             if len(audio_data) == 0:
                 print("WARNING: Attempting to send empty audio data")
                 return
                 
+            # For hangup messages, prioritize speed over detailed format checking
+            if is_hangup_message:
+                # Send as a single message for faster delivery
+                audio_payload = AudioPlaybackPayload(
+                    audio=base64.b64encode(audio_data).decode('utf-8')
+                )
+                
+                # Create message
+                message = Message(
+                    type=MessageType.AUDIO_PLAYBACK,
+                    timestamp=time.time(),
+                    sequence=self.sequence,
+                    payload=audio_payload.dict()
+                )
+                self.sequence += 1
+                
+                # Send message
+                await websocket.send(message.json())
+                print(f"Hangup audio message sent successfully")
+                return
+            
+            # For regular messages, continue with normal processing
             # Check WAV header if present
             if len(audio_data) >= 44:  # Minimum WAV header size
                 header = audio_data[:12]
@@ -798,11 +826,25 @@ class AudioServer:
                 if websocket not in self.connections:
                     print(f"Cannot hang up: Connection not found even after fallback checks")
                     return False
+            
+            # First, send hanging_up status to prepare client
+            try:
+                print("Step 1: Sending hanging_up status")
+                await self.send_status(
+                    websocket, 
+                    VADResult(is_speech=False, confidence=0.0), 
+                    state="hanging_up"
+                )
+                print("Hanging_up status sent")
+            except Exception as e:
+                print(f"Error sending hanging_up status: {e}")
+                import traceback
+                traceback.print_exc()
                 
             # Send a goodbye message if provided
             if message:
                 try:
-                    print(f"Step 1: Synthesizing goodbye message: '{message}'")
+                    print(f"Step 2: Synthesizing goodbye message: '{message}'")
                     # First convert the text to speech
                     audio_data = await self.tts_engine.synthesize(message)
                     
@@ -810,48 +852,36 @@ class AudioServer:
                     if not audio_data or len(audio_data) == 0:
                         print("Warning: Failed to generate audio for goodbye message")
                     else:
-                        print(f"Step 2: Sending {len(audio_data)} bytes of goodbye audio")
-                        # Send the audio
-                        await self.send_audio_playback(websocket, audio_data)
-                        # Small delay to ensure the audio is played
-                        await asyncio.sleep(1.0)
-                        print("Step 3: Goodbye audio sent successfully")
+                        print(f"Step 3: Sending {len(audio_data)} bytes of goodbye audio")
+                        # Send the audio with hangup flag for optimized delivery
+                        await self.send_audio_playback(websocket, audio_data, is_hangup_message=True)
+                        # Very small delay just to ensure the audio message is sent
+                        await asyncio.sleep(0.1)
+                        print("Goodbye audio sent successfully")
                 except Exception as e:
                     print(f"Error sending goodbye message: {e}")
                     import traceback
                     traceback.print_exc()
             
-            # Send status update indicating call is ending
-            try:
-                print("Step 4: Sending hanging_up status")
-                await self.send_status(
-                    websocket, 
-                    VADResult(is_speech=False, confidence=0.0), 
-                    state="hanging_up"
-                )
-                print("Step 5: Hanging_up status sent")
-            except Exception as e:
-                print(f"Error sending hanging_up status: {e}")
-                import traceback
-                traceback.print_exc()
+            # Remove the connection from tracking collections immediately
+            # This prevents any more messages from being sent to this client
+            print(f"Step 4: Removing client from tracking collections")
+            if websocket in self.connections:
+                self.connections.remove(websocket)
+                print("Connection removed from tracking")
+            if websocket in self.client_states:
+                del self.client_states[websocket]
+                print("Client state removed from tracking")
             
             # Close the connection
-            print(f"Step 6: Closing connection with {websocket.remote_address}")
+            print(f"Step 5: Closing connection with {websocket.remote_address}")
             try:
                 await websocket.close(code=1000, reason="Call ended")
-                print("Step 7: WebSocket close command sent")
+                print("WebSocket close command sent")
             except Exception as e:
                 print(f"Error closing websocket: {e}")
                 import traceback
                 traceback.print_exc()
-            
-            # Remove from our tracking collections
-            if websocket in self.connections:
-                self.connections.remove(websocket)
-                print("Step 8: Connection removed from tracking")
-            if websocket in self.client_states:
-                del self.client_states[websocket]
-                print("Step 9: Client state removed from tracking")
                 
             print("Hang up completed successfully")
             return True

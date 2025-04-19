@@ -28,6 +28,7 @@ hang_up_tool_instance = None
 # Define state
 class AgentState(BaseModel):
     messages: Annotated[List[AnyMessage], add_messages]
+    should_end_conversation: bool = False
 
 # Define a tool for hanging up the call
 class HangUpTool(BaseTool):
@@ -188,12 +189,17 @@ Additional Instructions:
 2. For general knowledge questions or current information, use the tavily_search_results tool
 3. Be extremely concise in your responses - keep them to a single short sentence whenever possible
 4. When using tools, explain what you're doing in just a few words before using them
-5. After using a tool, always check if it accomplished what the user wanted - if not, try to fix it or explain the issue briefly
+5. After using a tool, ALWAYS answer the user's original question with the information you found - don't just say what the tool returned
 6. For smart home controls, execute the action without asking for confirmation unless it's something risky
 7. For music playback, start playing appropriate music without lengthy explanations
 8. You know that "{current_song}" is currently playing (if anything)
 9. IMPORTANT: Since your responses will be read aloud via text-to-speech, avoid using any formatting or special characters
-10. Use the hang_up tool when the conversation has naturally concluded or when the user explicitly asks to end the call. Provide a very brief farewell.
+10. DEFAULT BEHAVIOR: After answering a user question with a tool, automatically end the conversation using the hang_up tool UNLESS:
+   - The user explicitly asked a follow-up question
+   - Your response requires further input from the user (like clarification or confirmation)
+   - You need more information to complete the task
+11. For search tools: When a search fails to find relevant information, state what you searched for, briefly summarize what was found (or not found), and ask if the user wants to refine the search instead of automatically trying again.
+12. NEVER respond with phrases like "I found that..." or "According to the tool..." - just give the information directly
 
 Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form."""
 
@@ -229,6 +235,49 @@ Remember that as a voice assistant, your responses should be much shorter than y
                     *messages
                 ]
             
+            # Check if we should analyze whether the conversation should end
+            # This happens after the user has sent a message and the agent has responded
+            should_analyze_conversation_end = False
+            if len(messages) >= 3:
+                last_message = messages[-1]
+                second_last_message = messages[-2]
+                
+                # If the last message is from the user and the second last was from the agent
+                if (last_message.type == "human" and
+                    (second_last_message.type == "ai" or 
+                     (second_last_message.type == "tool" and hasattr(second_last_message, '_verified') and second_last_message._verified))):
+                    should_analyze_conversation_end = True
+                    
+                    # Check if this is likely a simple information query - be more aggressive about ending
+                    # Look at all previous agent and tool messages
+                    prev_messages = messages[-5:] if len(messages) >= 5 else messages
+                    
+                    # Check for weather or information lookup patterns
+                    weather_keywords = ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'climate', 'hot', 'cold']
+                    info_keywords = ['time', 'date', 'status', 'fact', 'population', 'distance', 'height', 'age', 'when']
+                    
+                    # If the user's query contains these keywords, it's likely a simple information query
+                    has_info_keywords = (
+                        any(keyword in last_message.content.lower() for keyword in weather_keywords) or
+                        any(keyword in last_message.content.lower() for keyword in info_keywords)
+                    )
+                    
+                    # Look for tool usage in previous messages
+                    had_tool_use = any(
+                        hasattr(msg, 'type') and msg.type == 'tool' 
+                        for msg in prev_messages
+                    )
+                    
+                    # If this was an information query and tools were used, it's likely complete
+                    if has_info_keywords and had_tool_use:
+                        # Skip the analysis and just end it
+                        print("DEBUG: Detected information query after tool use - conversation will end")
+                        goodbye_message = "Thanks for your question. Is there anything else you need help with?"
+                        return AgentState(
+                            messages=[AIMessage(content=goodbye_message)],
+                            should_end_conversation=True
+                        )
+            
             # Check if the previous message is a ToolMessage indicating a tool result
             # Only do verification if we haven't already verified this tool result
             should_verify = False
@@ -240,16 +289,57 @@ Remember that as a voice assistant, your responses should be much shorter than y
                 if hasattr(tool_message, '_verified') and tool_message._verified:
                     already_verified = True
                     
+                # Check if the tool has a name that suggests it was a query/information tool
+                tool_name = getattr(tool_message, 'name', '').lower()
+                
+                # Specific tools that should almost always end after response
+                high_priority_end_tools = ['weather', 'forecast', 'temperature', 'climate']
+                
+                # General information query tools
+                is_query_tool = any(term in tool_name for term in [
+                    'search', 'get_', 'query', 'find', 'retrieve', 'lookup', 'check', 'status', 'time'
+                ])
+                
+                # If this is an unverified result from a query tool, it likely needs verification and might need to end after
+                end_after_tool_response = is_query_tool
+                
+                # High priority for ending if it's one of the specific tools
+                is_high_priority_end = any(term in tool_name for term in high_priority_end_tools) or any(term in tool_name for term in high_priority_end_tools)
+                
+                # Also check the user's question to detect weather queries regardless of tool name
+                weather_keywords = ['weather', 'temperature', 'forecast', 'rain', 'sunny', 'climate', 'hot', 'cold']
+                previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                
+                if previous_human_msg and any(keyword in previous_human_msg.content.lower() for keyword in weather_keywords):
+                    is_high_priority_end = True
+                    end_after_tool_response = True
+                    
                 if not already_verified:
-                    # Get the previous human message for context
-                    previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                    # Get the previous human message for context if not already fetched
+                    if not previous_human_msg:
+                        previous_human_msg = next((msg for msg in reversed(messages) if hasattr(msg, 'type') and msg.type == 'human'), None)
                     
                     # Make sure this isn't our verification prompt
                     if previous_human_msg and not previous_human_msg.content.startswith("The tool returned the above result"):
+                        end_suggestion = ""
+                        if is_high_priority_end:
+                            end_suggestion = f"\n\nThis is a weather/information query that typically needs no follow-up. Unless the user explicitly asked for more details or the answer is incomplete, you MUST add ##END## at the end of your response."
+                        elif end_after_tool_response:
+                            end_suggestion = f"\n\nThis appears to be an information query. Unless your response requires more input from the user, add ##END## at the end of your response to indicate the conversation should end after providing this answer."
+                        
                         verification_prompt = (
-                            f"Briefly verify if the tool result addressed the request: '{previous_human_msg.content}'. "
-                            f"Be EXTREMELY concise, using just a few words. If successful, say only what was done. "
-                            f"If it failed, try once more or briefly explain why."
+                            f"The tool returned results for the user's question: '{previous_human_msg.content}'. "
+                            f"Respond directly to the user's question with the information from the tool result. "
+                            f"Do NOT mention the tool or that you got information from a tool - just answer the question directly. "
+                            f"Be EXTREMELY concise, using just a few words. "
+                            f"For search tools that didn't find relevant information, briefly summarize what was found and "
+                            f"ask if the user would like to refine the search query."
+                            f"\n\nAfter providing this answer, the conversation should automatically end UNLESS:"
+                            f"\n- Your response explicitly requires more input from the user"
+                            f"\n- The tool didn't find what the user needed and you're asking to refine"
+                            f"\n- The user specifically asked for a multi-part answer or follow-up"
+                            f"{end_suggestion}"
+                            f"\n\nIn all other cases, add ##END## at the end of your response."
                         )
                         # Add this as a human message
                         messages.append(HumanMessage(content=verification_prompt))
@@ -257,6 +347,66 @@ Remember that as a voice assistant, your responses should be much shorter than y
                         setattr(tool_message, '_verified', True)
                         should_verify = True
             
+            # If we need to analyze whether the conversation should end, do that instead of normal processing
+            if should_analyze_conversation_end:
+                # Extract the last few exchanges for analysis
+                last_exchanges = messages[-4:] if len(messages) >= 4 else messages
+                
+                # Create a prompt to analyze if the conversation should end
+                analysis_prompt = (
+                    "Based on the recent exchanges, determine if the conversation should naturally end. "
+                    "Analyze ONLY these factors:\n"
+                    "1. Has the user's request or question been fully addressed?\n"
+                    "2. Has the user said goodbye, thanks, or otherwise signaled they're finished?\n"
+                    "3. Has the conversation reached a natural conclusion?\n"
+                    "4. Is there no clear follow-up question or topic to discuss?\n\n"
+                    "Output ONLY a single word: 'end' if the conversation should end, or 'continue' if it should continue."
+                )
+                
+                # Add the analysis prompt as a hidden message to the LLM
+                analysis_messages = [
+                    {"role": "system", "content": "You are analyzing if a conversation has naturally concluded."},
+                    *last_exchanges,
+                    HumanMessage(content=analysis_prompt)
+                ]
+                
+                # Get the LLM's analysis
+                analysis_response = llm.invoke(analysis_messages)
+                
+                # Determine if conversation should end based on analysis
+                should_end = False
+                if hasattr(analysis_response, 'content'):
+                    content = analysis_response.content.lower().strip()
+                    if content == 'end' or 'end' in content.split():
+                        should_end = True
+                        print("DEBUG: LLM determined conversation should end")
+                
+                # If the conversation should end, use the hang up tool
+                if should_end:
+                    # Generate a friendly goodbye message
+                    goodbye_prompt = "Generate a very brief, friendly goodbye message to end the conversation naturally."
+                    goodbye_messages = [
+                        {"role": "system", "content": "Generate a brief, friendly goodbye message."},
+                        *last_exchanges,
+                        HumanMessage(content=goodbye_prompt)
+                    ]
+                    
+                    goodbye_response = llm.invoke(goodbye_messages)
+                    goodbye_message = "Thanks for the conversation. Goodbye!"
+                    
+                    if hasattr(goodbye_response, 'content'):
+                        goodbye_message = goodbye_response.content
+                        # Ensure it's concise
+                        if len(goodbye_message) > 50:
+                            goodbye_message = "Thanks for the conversation. Goodbye!"
+                
+                    # Return the response with the should_end_conversation flag set
+                    return AgentState(
+                        messages=[AIMessage(content=goodbye_message)],
+                        should_end_conversation=True
+                    )
+            
+            # Normal processing
             response = llm_with_tools.invoke(messages)
             
             # If this was a verification response, ensure it's extremely short
@@ -266,8 +416,19 @@ Remember that as a voice assistant, your responses should be much shorter than y
                 if len(content) > 80:
                     shortened = content[:77] + "..."
                     response.content = shortened
+            
+            # Check for ##END## marker which indicates conversation should end
+            should_end_conversation = False
+            if hasattr(response, 'content') and "##END##" in response.content:
+                # Remove the marker but set the flag
+                response.content = response.content.replace("##END##", "").strip()
+                should_end_conversation = True
+                print("DEBUG: Found ##END## marker in response - conversation will end")
                 
-            return AgentState(messages=[response])
+            return AgentState(
+                messages=[response],
+                should_end_conversation=should_end_conversation
+            )
         
         # Add nodes to graph
         builder.add_node("agent", agent)
