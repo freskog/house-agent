@@ -148,8 +148,8 @@ class AgentInterface:
         self.audio_server = None  # Reference to the audio server
         self.current_client = None  # Current websocket client
         self._last_client_address = None  # Track the last client address for debugging
-        # Store conversation history
-        self.conversation_history = []  # List to store all conversation messages
+        # Store conversation history per client
+        self.client_conversation_history = {}  # Dictionary to store conversation history per client
         self._loop_count = 0
         self._is_agent_initialized = False  # Track if the agent is fully initialized
         
@@ -230,15 +230,17 @@ class AgentInterface:
             
         # Add the new user message to conversation history
         user_message = HumanMessage(content=transcription.text)
-        self.conversation_history.append(user_message)
+        if current_client not in self.client_conversation_history:
+            self.client_conversation_history[current_client] = []
+        self.client_conversation_history[current_client].append(user_message)
         
-        # Keep only the last 4 messages to prevent context from growing too large and slowing down processing
-        # Further reduced from 6 for faster processing
-        if len(self.conversation_history) > 4:
-            self.conversation_history = self.conversation_history[-4:]
+        # Keep only the last 10 messages to prevent context from growing too large and slowing down processing
+
+        if len(self.client_conversation_history[current_client]) > 10:
+            self.client_conversation_history[current_client] = self.client_conversation_history[current_client][-4:]
             
         # Create input state with the conversation history
-        input_state = AgentState(messages=self.conversation_history)
+        input_state = AgentState(messages=self.client_conversation_history[current_client])
         
         # Process the input and get response - measure response time
         start_time = time.time()
@@ -286,7 +288,9 @@ class AgentInterface:
         print(f"Original response length: {len(response_text)}, Cleaned response length: {len(cleaned_response)}")
         
         # Add the agent's response to conversation history
-        self.conversation_history.append(AIMessage(content=cleaned_response))
+        if current_client not in self.client_conversation_history:
+            self.client_conversation_history[current_client] = []
+        self.client_conversation_history[current_client].append(AIMessage(content=cleaned_response))
         
         # Split the response into sentences for streaming
         # This regex splits on sentence boundaries while preserving punctuation
@@ -396,6 +400,17 @@ class AgentInterface:
             traceback.print_exc()
             return f"Failed to hang up the call: {e}"
 
+    async def cleanup_client(self, client):
+        """Clean up resources for a specific client"""
+        if client in self.client_conversation_history:
+            print(f"Cleaning up conversation history for client {getattr(client, 'remote_address', 'unknown')}")
+            del self.client_conversation_history[client]
+            
+        # If this was the current client, clear that reference
+        if client == self.current_client:
+            self.current_client = None
+            self._last_client_address = None
+
 async def main(args):
     """Main entry point"""
     try:
@@ -479,7 +494,7 @@ async def main(args):
                     print(f"- Audio server running: yes")
                     print(f"- Agent initialized: {agent_interface._is_agent_initialized}")
                     print(f"- Current client: {agent_interface._last_client_address or 'None'}")
-                    print(f"- Conversation history size: {len(agent_interface.conversation_history)} messages")
+                    print(f"- Conversation history size: {len(agent_interface.client_conversation_history.get(agent_interface.current_client, [])) if agent_interface.current_client else 'None'} messages")
                 
                 await asyncio.sleep(0.1)  # Reduced sleep time
         
@@ -494,8 +509,13 @@ async def main(args):
             agent_interface.current_client = websocket
             print(f"Client connected: {websocket.remote_address}")
             
-            # Call the original method
-            await original_handle_connection(websocket)
+            try:
+                # Call the original method
+                await original_handle_connection(websocket)
+            finally:
+                # Clean up client resources when connection ends
+                print(f"Client disconnected: {websocket.remote_address}")
+                await agent_interface.cleanup_client(websocket)
         
         # Replace the method
         server.handle_connection = patched_handle_connection

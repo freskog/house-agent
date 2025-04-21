@@ -329,28 +329,6 @@ async def make_graph():
             except Exception as e:
                 print(f"Failed to list prompts: {e}")
             
-            # Fall back to hardcoded prompt if retrieval failed
-            if not homeassistant_content:
-                # Show connected servers
-                servers = list(client.sessions.keys())
-                if len(servers) == 0:
-                    print("❌ WARNING: No MCP servers were found! This suggests either:")
-                    print("   1. The Model Context Protocol Server integration is not installed in Home Assistant")
-                    print("   2. There's an issue with the HA_API_KEY token")
-                    print("   Please follow the setup guide in ha_mcp_integration_setup_guide.md")
-                else:
-                    print("Using hardcoded system prompt as MCP prompt retrieval failed (expected behavior)")
-                    print(f"Connected to these MCP servers: {servers}")
-                
-                homeassistant_content = """
-I'm your smart home assistant. I can help you control your home, manage devices, play music, and answer questions.
-For device control, I'll tell you what I'm doing as I execute your commands. 
-When you ask me to search for information, I'll do my best to find relevant answers.
-
-I can control lights, thermostats, media players, and other devices in your home.
-I can also search the web for information and answer general knowledge questions.
-"""
-
             # Try to get the current playing song
             current_song = "Nothing playing"
             try:
@@ -394,14 +372,31 @@ Home assistant prompt:
 "{homeassistant_content}"
 
 
+When playing music, your response MUST contain ONLY the exact song name - nothing else. DO NOT inlude
+phrases like "Enjoy the music" or "Next up" or anything else. Just the song name.
+
+Example interaction when playing music: 
+    Human:
+        Play "Running Up That Hill." [ Silence ]
+    Tool:
+        play(Running Up That Hill)
+    AI:
+        Starting playback: Kate Bush - Running Up That Hill (A Deal With God)
+
+
+
+
 Additional Instructions:
 1. Always be aware of the current date ({current_date}) when answering questions about time or dates
 2. For general knowledge questions or current information, use the tavily_search_results tool
 3. Be extremely concise in your responses - keep them to a single short sentence whenever possible
-4. When using tools, explain what you're doing in just a few words before using them
-5. After using a tool, ALWAYS answer the user's original question with the information you found - don't just say what the tool returned
-6. For smart home controls, execute the action without asking for confirmation unless it's something risky
-7. For music playback, start playing appropriate music without lengthy explanations
+4. SYSTEM REQUIREMENT: When playing music, your response MUST contain ONLY the exact song name - nothing else. Example:
+   - User: "Play Dixie Chicken"
+   - INCORRECT response: "Now playing: Dixie Chicken by Little Feat. Enjoy the music! Next up: Midnight Rider by The Allman Brothers Band, Fat Man in the Bathtub by Little Feat, Black Water by The Doobie Brothers"
+   - CORRECT response: "Now playing Dixing Chicken by Little"
+5. When using tools, explain what you're doing in just a few words before using them
+6. After using a tool, ALWAYS answer the user's original question with the information you found - don't just say what the tool returned
+7. For smart home controls, execute the action without asking for confirmation unless it's something risky
 8. You know that "{current_song}" is currently playing (if anything)
 9. IMPORTANT: Since your responses will be read aloud via text-to-speech, avoid using any formatting or special characters
 10. For search tools: When a search fails to find relevant information, state what you searched for, briefly summarize what was found (or not found), and ask if the user wants to refine the search instead of automatically trying again.
@@ -409,7 +404,9 @@ Additional Instructions:
 
 IMPORTANT: 
 
-Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form."""
+Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form.
+
+[Prompt version: v2 - Updated: {current_date}]"""
 
             # Store the enhanced system message globally for reuse
             cached_system_message = enhanced_system_message
@@ -460,8 +457,13 @@ Remember that as a voice assistant, your responses should be much shorter than y
                         *messages
                     ]
 
-                # Normal processing
-                response = llm.invoke(messages)
+                # Always create a new thread_id for now
+                # This will be overridden by the config if provided when the graph is invoked
+                thread_id = str(uuid.uuid4())
+                
+                # Normal processing with thread_id
+                # This will be passed through to LangSmith for tracing
+                response = llm.invoke(messages, config={"thread_id": thread_id})
                 
                 # For tool messages, ensure they have required fields
                 if isinstance(response, ToolMessage) and not hasattr(response, "tool_call_id"):

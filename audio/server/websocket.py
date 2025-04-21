@@ -499,15 +499,11 @@ class AudioServer:
                 # Use the configured callback or default
                 callback_result = await self.transcription_callback(transcription_result)
                 processing_time = time.time() - processing_start_time
-                
-                # Debug the callback result
-                print(f"DEBUG: Callback result type: {type(callback_result)}, value: {callback_result}")
-                
+                                
                 # Handle different types of callback results
                 if isinstance(callback_result, str):
                     # Text response
                     response_text = callback_result
-                    print(f"DEBUG: Got text response: '{response_text}', type: {type(response_text)}, length: {len(str(response_text))}")
                     
                     # Add trace metadata for the response if available
                     if parent_run and hasattr(parent_run, 'add_metadata'):
@@ -517,11 +513,9 @@ class AudioServer:
                     
                     # Check for valid text more carefully
                     is_valid_text = bool(response_text and response_text.strip())
-                    print(f"DEBUG: Is valid text for TTS? {is_valid_text}")
                         
                     # Check if the response is a question
                     is_question = self._is_question(response_text) if is_valid_text else False
-                    print(f"DEBUG: Is response a question? {is_question}")
                         
                     # Process TTS regardless of tracing availability
                     if is_valid_text:
@@ -888,6 +882,7 @@ class AudioServer:
             print(f"Error sending error message: {e}")
             # Don't try to send an error about sending an error - would cause a loop
             
+    @traceable(run_type="chain", name="Audio_Chunk_Send")
     async def send_audio_playback(self, websocket, audio_data: bytes, is_hangup_message=False, is_final=False):
         """Send audio data to a client for playback
         
@@ -905,7 +900,9 @@ class AudioServer:
             
             # Encode audio data to base64
             audio_b64 = ""
+            audio_size_bytes = 0
             if audio_data:  # Only encode if there's actual data
+                audio_size_bytes = len(audio_data)
                 audio_b64 = base64.b64encode(audio_data).decode('utf-8')
             
             # Create message with sequence parameter
@@ -939,6 +936,8 @@ class AudioServer:
             # Log only for empty final chunks
             if is_final and not audio_data:
                 print(f"Sent final stream marker (empty chunk)")
+            else:
+                print(f"Sent audio chunk: {audio_size_bytes/1024:.2f}KB, seq={sequence}, final={is_final}, hangup={is_hangup_message}")
                 
             return True
         except Exception as e:
@@ -1155,45 +1154,32 @@ class AudioServer:
     async def text_to_speech_streaming(self, text: str, websocket, is_hangup_message=False) -> bool:
         """Convert text to speech using TTS engine and stream to client in real-time
         
-        This method processes the text sentence by sentence and streams audio to the client
-        as soon as each sentence is converted to speech, without waiting for the entire text
-        to be processed.
-        
         Args:
-            text: Text to convert to speech
-            websocket: WebSocket connection to send audio to
-            is_hangup_message: Whether this is a goodbye message before hanging up
+            text: The text to convert to speech
+            websocket: The websocket connection to send the audio to
+            is_hangup_message: Whether this is part of a call hangup
             
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            if not text or text.strip() == "":
-                print("Warning: Empty text provided to streaming TTS, skipping synthesis")
-                return False
-                
-            print(f"Streaming TTS request: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+            print(f"Streaming TTS for text: '{text[:50]}{'...' if len(text) > 50 else ''}'")
             
-            # Check if TTS engine is initialized
+            # Check TTS engine
             if not self.tts_engine or not self.tts_engine.is_initialized():
-                print("ERROR: TTS engine not initialized for streaming!")
+                print("TTS engine not available or not initialized")
                 return False
                 
-            # Check if we have a valid websocket and it's still connected
-            if websocket not in self.connections:
-                print("ERROR: Invalid websocket connection for streaming TTS")
-                return False
-            
             # Process sentences/segments into audio chunks
-            # We need to know when we've reached the end for proper hangup handling
             sentences = self.tts_engine._preprocess_text(text)
+            
             if not sentences:
                 print("WARNING: No sentences to process")
                 return False
                 
             print(f"Processing {len(sentences)} text segments for streaming TTS")
-                
-            # Process text through streaming TTS - handling each sentence
+            
+            # Initialize tracking
             chunk_count = 0
             total_bytes = 0
             start_time = time.time()
@@ -1202,6 +1188,7 @@ class AudioServer:
             # Process each sentence and convert to audio
             for i, sentence in enumerate(sentences):
                 if not sentence.strip():
+                    print(f"Skipping empty sentence {i+1}/{len(sentences)}")
                     continue
                     
                 # Track if this is the last sentence (for hangup handling)
@@ -1216,6 +1203,7 @@ class AudioServer:
                     continue
                     
                 chunk_count += 1
+                audio_size = len(audio_data)
                 is_first_chunk = (chunk_count == 1)
                 
                 # Only mark as hangup if this is the last sentence AND this is a hangup message
@@ -1224,7 +1212,7 @@ class AudioServer:
                 # Record timing for first chunk
                 if is_first_chunk:
                     first_chunk_time = time.time()
-                    print(f"First audio chunk ({len(audio_data)} bytes) generated in {first_chunk_time - start_time:.2f}s")
+                    print(f"First audio chunk ({audio_size} bytes) generated in {first_chunk_time - start_time:.2f}s")
                 
                 # Send this chunk to the client
                 success = await self.send_audio_playback(
@@ -1238,19 +1226,15 @@ class AudioServer:
                     print(f"ERROR: Failed to send audio for sentence {i+1}, aborting stream")
                     return False
                 
-                total_bytes += len(audio_data)
-                
-                # Print stats for first chunk
-                if is_first_chunk:
-                    print(f"First audio chunk sent in {time.time() - start_time:.2f}s")
-                
+                total_bytes += audio_size
 
-            
             # Report statistics
             total_time = time.time() - start_time
+            ttft = first_chunk_time - start_time if first_chunk_time else None  # Time To First Token equivalent
+            
             print(f"TTS streaming complete: {chunk_count} chunks, {total_bytes/1024:.1f}KB in {total_time:.2f}s")
-            if first_chunk_time:
-                print(f"Time to first chunk: {first_chunk_time - start_time:.2f}s")
+            if ttft:
+                print(f"Time to first chunk: {ttft:.2f}s")
                 if chunk_count > 0:
                     print(f"Average chunk size: {total_bytes/chunk_count:.1f} bytes")
                     

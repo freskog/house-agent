@@ -127,17 +127,17 @@ class TTSEngine:
             # Safest fallback is to return the whole text as one chunk
             return [text]
     
-
+    @traceable(run_type="chain", name="TTS_Generate_Audio_Chunk")
     async def _generate_audio(self, text):
         """Generate audio from text using Kokoro pipeline
         
         Optimized for single sentences or small chunks of text.
         """
-        if not self.pipeline:
-            print("Kokoro pipeline not initialized")
-            return None
-            
         try:
+            if not self.pipeline:
+                print("Kokoro pipeline not initialized")
+                return None
+                
             # Use event loop to run CPU-bound TTS in a thread pool
             loop = asyncio.get_event_loop()
             
@@ -183,6 +183,7 @@ class TTSEngine:
             buffer = io.BytesIO()
             sf.write(buffer, audio_data, 24000, format="WAV", subtype="PCM_16")
             buffer.seek(0)
+            
             return buffer.read()
             
         except Exception as e:
