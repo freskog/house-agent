@@ -33,6 +33,7 @@ class TranscriptionResult(BaseModel):
     segments: List[Dict[str, Any]] = []
     duration: float = 0.0
     process_time: float = 0.0
+    thread_id: Optional[str] = None
     # Note: client reference is now handled via a non-serialized _websocket attribute
     
 class Transcriber:
@@ -212,45 +213,47 @@ class Transcriber:
                 # If transcription produced no text, provide a fallback response
                 if not text.strip():
                     print(f"Empty transcription after {process_time:.2f}s, using fallback")
-                    
-                    # Use audio characteristics to determine a response
-                    if duration < 1.0:
-                        fallback_text = "I heard a brief sound"
-                    elif duration < 3.0:
-                        fallback_text = "I heard you say something short"
-                    else:
-                        fallback_text = "I heard you speaking but couldn't understand what you said"
-                        
                     return TranscriptionResult(
-                        text=fallback_text,
+                        text="I could not understand that. Could you please speak more clearly?",
                         language="en",
                         duration=duration,
-                        process_time=process_time
+                        process_time=process_time,
+                        thread_id=thread_id
                     )
-                
-                print(f"Transcription result ({process_time:.2f}s): '{text}'")
-                
-                # Create result object
-                return TranscriptionResult(
-                    text=text,
-                    language="en",  # pywhispercpp doesn't expose language info in the same way
-                    segments=[{
+                    
+                # Create segments array in the expected format
+                segments_formatted = []
+                for i, segment in enumerate(segments_list):
+                    segments_formatted.append({
                         "id": i,
                         "text": segment.text,
                         "start": segment.start_time if hasattr(segment, 'start_time') else 0.0,
                         "end": segment.end_time if hasattr(segment, 'end_time') else 0.0
-                    } for i, segment in enumerate(segments_list)],
+                    })
+                
+                # Create and return the result
+                result = TranscriptionResult(
+                    text=text.strip(),
+                    language="en",  # Currently hardcoded language
+                    segments=segments_formatted,
                     duration=duration,
-                    process_time=process_time
+                    process_time=process_time,
+                    thread_id=thread_id
                 )
+                
+                print(f"Transcription completed in {process_time:.2f}s")
+                return result
             
         except Exception as e:
-            print(f"Error transcribing audio: {e}")
+            print(f"Transcription error: {e}")
             import traceback
             traceback.print_exc()
+            
+            # Return a failure result
             return TranscriptionResult(
-                text=f"Error transcribing audio: {e}",
-                language="en"
+                text="Sorry, there was an error processing your speech.",
+                language="en",
+                thread_id=thread_id
             )
             
     def reset(self):

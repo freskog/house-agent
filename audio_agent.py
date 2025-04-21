@@ -195,8 +195,18 @@ class AgentInterface:
         # Store the current client from the websocket server context
         # Don't rely on the transcription.client as it's not serializable
         current_client = None
+        thread_id = None
+        
         if hasattr(transcription, '_websocket') and transcription._websocket:
             current_client = transcription._websocket
+            
+            # Try to get the thread_id from the client_state
+            if self.audio_server and hasattr(self.audio_server, 'client_states'):
+                client_state = self.audio_server.client_states.get(current_client)
+                if client_state and hasattr(client_state, 'thread_id'):
+                    thread_id = client_state.thread_id
+                    print(f"Using thread_id from client state: {thread_id}")
+            
             # Update our client reference for hang-up functionality
             if current_client != self.current_client:
                 self.current_client = current_client
@@ -230,7 +240,15 @@ class AgentInterface:
         
         # Process the input and get response - measure response time
         start_time = time.time()
-        result = await self.graph.ainvoke(input_state)
+        
+        # Pass thread_id to ainvoke if available
+        if thread_id:
+            print(f"Invoking graph with thread_id: {thread_id}")
+            result = await self.graph.ainvoke(input_state, config={"thread_id": thread_id})
+        else:
+            print("Invoking graph without thread_id")
+            result = await self.graph.ainvoke(input_state)
+            
         elapsed = time.time() - start_time
         print(f"Agent processing completed in {elapsed:.2f} seconds")
 

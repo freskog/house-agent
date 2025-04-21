@@ -273,14 +273,6 @@ class AudioServer:
             if not client_state:
                 return
             
-            # Occasionally analyze the raw chunk to check for sample rate issues
-            if random.random() < 0.05:  # Only analyze ~5% of chunks to reduce overhead
-                try:
-                    # Convert to numpy for analysis
-                    audio_np = np.frombuffer(audio_data, dtype=np.int16)
-                except Exception as e:
-                    print(f"Error analyzing raw audio chunk: {e}")
-                
             # Add to pre-VAD buffer
             if len(audio_data) > 0:
                 # Only store non-empty frames in pre-buffer
@@ -473,6 +465,11 @@ class AudioServer:
                     audio_data, 
                     thread_id=client_state.thread_id
                 )
+                
+                # Ensure the thread_id is set on the result
+                if not transcription_result.thread_id:
+                    transcription_result.thread_id = client_state.thread_id
+                    
                 transcription_time = time.time() - transcription_start_time
                 print(f"Transcribed ({transcription_time:.1f}s): '{transcription_result.text}'")
                 
@@ -491,6 +488,10 @@ class AudioServer:
                         "transcription_text": transcription_result.text,
                         "transcription_duration_sec": transcription_time
                     })
+                
+                # Store websocket reference for non-serializable access
+                # This allows the callback to reference the original websocket
+                transcription_result._websocket = websocket
                 
                 # Process transcription with callback
                 processing_start_time = time.time()

@@ -39,6 +39,9 @@ class AudioServer:
         # Register default callbacks
         self.register_default_callbacks()
         
+        # Dictionary to store client thread IDs
+        self.client_threads = {}
+        
     def log(self, message):
         """Log a message"""
         if self.debug:
@@ -47,6 +50,23 @@ class AudioServer:
     def register_default_callbacks(self):
         """Register default callbacks"""
         self.callback_registry.register("demo", self.demo_transcription_callback)
+    
+    def get_client_thread_id(self, client_id):
+        """Get or create a thread ID for a client
+        
+        Args:
+            client_id: Unique identifier for the client
+            
+        Returns:
+            str: Thread ID for the client
+        """
+        if client_id not in self.client_threads:
+            # Create a new thread ID for this client
+            import uuid
+            self.client_threads[client_id] = str(uuid.uuid4())
+            self.log(f"Created new thread ID for client: {self.client_threads[client_id]}")
+        
+        return self.client_threads[client_id]
         
     async def demo_transcription_callback(self, transcription):
         """Demo callback that echoes what was heard"""
