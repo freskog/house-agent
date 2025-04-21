@@ -271,7 +271,6 @@ class AudioServer:
             # Get client state
             client_state = self.client_states.get(websocket)
             if not client_state:
-                print("Client state not found, ignoring audio frame")
                 return
             
             # Occasionally analyze the raw chunk to check for sample rate issues
