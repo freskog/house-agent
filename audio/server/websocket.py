@@ -1151,6 +1151,7 @@ class AudioServer:
         
         return False 
 
+    @traceable(run_type="chain", name="TTS_Streaming_Pipeline")
     async def text_to_speech_streaming(self, text: str, websocket, is_hangup_message=False) -> bool:
         """Convert text to speech using TTS engine and stream to client in real-time
         

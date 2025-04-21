@@ -174,8 +174,28 @@ class SimpleAudioClient:
             send_task = asyncio.create_task(self.send_audio_loop())
             receive_task = asyncio.create_task(self.receive_audio_loop())
             
-            # Wait for both tasks to complete
-            await asyncio.gather(send_task, receive_task)
+            # Wait for both tasks to complete or until self.running becomes False
+            while self.running:
+                # Check if either task has completed
+                if send_task.done() or receive_task.done():
+                    break
+                    
+                # Short sleep to prevent high CPU usage
+                await asyncio.sleep(0.1)
+                
+            # Once we've exited the loop (either because self.running is False or a task completed),
+            # cancel any remaining tasks
+            if not send_task.done():
+                send_task.cancel()
+            if not receive_task.done():
+                receive_task.cancel()
+                
+            # Try to wait for the tasks to be properly cancelled
+            try:
+                await asyncio.wait_for(asyncio.gather(send_task, receive_task, return_exceptions=True), timeout=2.0)
+            except asyncio.TimeoutError:
+                print("Some tasks did not terminate gracefully")
+                
         except asyncio.CancelledError:
             print("Tasks cancelled")
         except Exception as e:
@@ -183,9 +203,11 @@ class SimpleAudioClient:
             import traceback
             traceback.print_exc()
         finally:
+            print("Client shutting down...")
             self.running = False
             await self.disconnect()
             self.cleanup()
+            print("Client shutdown complete")
             
     async def send_audio_loop(self):
         """Continuously read from microphone and send to server"""
@@ -194,6 +216,7 @@ class SimpleAudioClient:
                 # If we're hanging up, stop sending audio
                 if self.hanging_up:
                     print("Hanging up - stopped sending audio")
+                    self.running = False  # Set running to false to trigger client shutdown
                     break
                     
                 # Check if the websocket is closed
@@ -284,6 +307,12 @@ class SimpleAudioClient:
                         if is_hangup:
                             print("📞 Received audio with hangup flag")
                             self.hanging_up = True
+                            
+                            # If this is a final empty message with hangup flag, terminate immediately
+                            if is_final and "audio" not in msg["payload"]:
+                                print("📞 Received final hangup signal without audio, terminating client...")
+                                self.running = False
+                                break
                         
                         # Check if there's audio data to play
                         if "audio" in msg["payload"]:
@@ -294,6 +323,10 @@ class SimpleAudioClient:
                             if audio_data and len(audio_data) > 0:
                                 print(f"Playing audio: hangup={is_hangup}, final={is_final}, size={len(audio_data)}bytes")
                                 self.process_and_play_audio(audio_data)
+                                
+                                # Check if this was the final audio chunk in a hangup sequence
+                                if is_hangup and is_final:
+                                    print("📞 Received final hangup audio, client will terminate after playback")
                             else:
                                 print("Received empty audio data")
                     
@@ -399,6 +432,11 @@ class SimpleAudioClient:
                 print(f"▶️ Playing audio ({len(pcm_data)} bytes)")
                 self.speaker_stream.write(pcm_data)
                 print("✅ Audio playback complete")
+                
+                # If we're hanging up and this was the final audio chunk, terminate the client
+                if self.hanging_up:
+                    print("📞 Final hangup audio played, terminating client...")
+                    self.running = False
             else:
                 print("Speaker stream unavailable - cannot play audio")
             

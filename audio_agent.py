@@ -22,6 +22,8 @@ from typing import List
 import collections
 import re
 import sys
+from langchain_core.messages import HumanMessage, AIMessage
+from langsmith import traceable
 
 # Set C locale to avoid Whisper segmentation fault on systems with non-C locales
 try:
@@ -36,7 +38,6 @@ except Exception as e:
 
 # Import the agent modules
 from agent import make_graph, AgentState
-from langchain_core.messages import HumanMessage, AIMessage
 
 # Load environment variables
 load_dotenv()    
@@ -190,6 +191,7 @@ class AgentInterface:
             else:
                 print("Client reference set but no remote_address attribute")
     
+    @traceable(run_type="chain", name="Agent_Process_Transcription")
     async def process_transcription(self, transcription: TranscriptionResult) -> str:
         """Process transcription through the agent"""
         # Store the current client from the websocket server context

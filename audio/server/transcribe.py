@@ -34,6 +34,7 @@ class TranscriptionResult(BaseModel):
     duration: float = 0.0
     process_time: float = 0.0
     thread_id: Optional[str] = None
+    confidence: float = 1.0
     # Note: client reference is now handled via a non-serialized _websocket attribute
     
 class Transcriber:
