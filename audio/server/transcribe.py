@@ -8,9 +8,11 @@ import wave
 import time
 import threading
 import platform
+import locale
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 import numpy as np
+from langsmith import traceable
 
 class TranscriptionConfig(BaseModel):
     """Configuration for transcription"""
@@ -53,7 +55,23 @@ class Transcriber:
             with self.lock:
                 if self.model is not None:  # Double-check under lock
                     return True
-                    
+                
+                # CRITICAL: Fix locale before initializing Whisper to prevent segfault
+                # This must be done right before Whisper initialization
+                print("Setting C locale to avoid Whisper segmentation fault...")
+                try:
+                    # Store original locale to restore later if needed
+                    original_locale = locale.getlocale()
+                    # Set locale to C
+                    locale.setlocale(locale.LC_ALL, 'C')
+                    # Also set environment variables
+                    os.environ['LC_ALL'] = 'C'
+                    os.environ['LANG'] = 'C'
+                    os.environ['LANGUAGE'] = 'C'
+                    print("Locale set to C")
+                except Exception as e:
+                    print(f"Warning: Failed to set locale: {e}")
+                
                 # Set CoreML usage for Apple Silicon if enabled
                 if (self.config.use_coreml and platform.system() == "Darwin" 
                     and platform.machine() == "arm64"):
@@ -65,12 +83,22 @@ class Transcriber:
                 print(f"Loading transcription model: {self.config.model_name}")
                 self.model = Model(model=self.config.model_name)
                 print(f"Transcription model loaded successfully")
+                
+                # Restore original locale if needed
+                try:
+                    if original_locale:
+                        locale.setlocale(locale.LC_ALL, original_locale)
+                except Exception:
+                    # If restoring fails, leave as C - operation succeeded anyway
+                    pass
+                
                 return True
         except Exception as e:
             print(f"Error initializing transcription model: {e}")
             return False
     
-    def transcribe_audio(self, audio_data: bytes, sample_rate: int = 16000) -> TranscriptionResult:
+    @traceable(run_type="chain", name="Audio_Transcription")
+    def transcribe_audio(self, audio_data: bytes, sample_rate: int = 16000, thread_id: Optional[str] = None) -> TranscriptionResult:
         """
         Transcribe audio data to text directly from memory
         
@@ -78,22 +106,30 @@ class Transcriber:
             audio_data: Raw audio data as bytes (assumed to be 16-bit, mono PCM)
             sample_rate: Sample rate of the audio in Hz (default: 16000 Hz)
                          Note: This must match the actual sample rate of the provided audio data
+            thread_id: Optional thread ID for LangSmith tracing
         """
-        if not audio_data or len(audio_data) == 0:
-            print("ERROR: Empty audio data passed to transcribe_audio")
-            return TranscriptionResult(
-                text="Error: Empty audio data",
-                language="en",
-                duration=0.0,
-                process_time=0.0
-            )
-            
-        if self.model is None:
-            if not self.initialize():
-                raise RuntimeError("Failed to initialize transcription model")
-            print("Transcription model initialized on demand")
-                
         try:
+            # Configure environment for LangSmith if using a non-standard API key format
+            if os.environ.get("LANGSMITH_API_KEY", "").startswith("lsv2_"):
+                os.environ["LANGSMITH_ALLOW_ANY_API_KEY_FORMAT"] = "true"
+            
+            # Set thread_id in environment if provided
+            if thread_id:
+                os.environ["LANGSMITH_THREAD_ID"] = thread_id
+                
+            # Validate audio data
+            if not audio_data:
+                print("ERROR: Received empty audio data")
+                return TranscriptionResult(
+                    text="",
+                    language="en"
+                )
+            
+            if self.model is None:
+                if not self.initialize():
+                    raise RuntimeError("Failed to initialize transcription model")
+                print("Transcription model initialized on demand")
+                
             # Calculate audio duration directly from PCM data (assuming 16-bit audio)
             bytes_per_sample = 2  # 16-bit audio = 2 bytes per sample
             channels = 1  # Mono
@@ -158,9 +194,14 @@ class Transcriber:
                 
                 print(f"Temporary file created: {temp_path}")
                 
+                # Set C locale again before transcription
+                os.environ['LC_ALL'] = 'C'
+                os.environ['LANG'] = 'C'
+                os.environ['LANGUAGE'] = 'C'
+                
                 # Run transcription
                 start_time = time.time()
-                print(f"Starting whisper transcription...")
+                print(f"Starting whisper transcription with C locale...")
                 segments = self.model.transcribe(temp_path)
                 process_time = time.time() - start_time
                 

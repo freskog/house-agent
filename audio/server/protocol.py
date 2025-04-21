@@ -17,6 +17,7 @@ class MessageType(str, Enum):
     AUDIO_PLAYBACK = "audio_playback"
     STATUS = "status"
     ERROR = "error"
+    DISCONNECT = "disconnect"  # New message type for client-initiated disconnection
 
 # Standardized audio configuration - no more options for format
 class AudioConfig(BaseModel):
@@ -107,6 +108,17 @@ class Message(BaseModel):
             payload={
                 "error": error,
                 "code": code
+            }
+        )
+
+    @classmethod
+    def create_disconnect(cls, sequence: int, reason: str = "") -> 'Message':
+        """Create a disconnect message"""
+        return cls(
+            type=MessageType.DISCONNECT,
+            sequence=sequence,
+            payload={
+                "reason": reason
             }
         )
 

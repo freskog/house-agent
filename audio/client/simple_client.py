@@ -17,6 +17,7 @@ import wave
 import io
 import time
 import argparse
+import queue
 
 class SimpleAudioClient:
     def __init__(self, server_url="ws://localhost:8765"):
@@ -27,6 +28,7 @@ class SimpleAudioClient:
         self.mic_stream = None
         self.speaker_stream = None
         self.running = False
+        self.hanging_up = False  # Track when we're in the process of hanging up
         self.sequence = 0  # Counter for message sequencing
         
         # Audio configuration
@@ -89,29 +91,70 @@ class SimpleAudioClient:
     
     def cleanup(self):
         """Clean up resources"""
+        print("Cleaning up audio resources...")
+            
         if self.mic_stream:
-            self.mic_stream.stop_stream()
-            self.mic_stream.close()
-            self.mic_stream = None
+            try:
+                self.mic_stream.stop_stream()
+                self.mic_stream.close()
+            except Exception as e:
+                print(f"Error closing mic stream: {e}")
+            finally:
+                self.mic_stream = None
             
         if self.speaker_stream:
-            self.speaker_stream.stop_stream()
-            self.speaker_stream.close()
-            self.speaker_stream = None
+            try:
+                self.speaker_stream.stop_stream()
+                self.speaker_stream.close()
+            except Exception as e:
+                print(f"Error closing speaker stream: {e}")
+            finally:
+                self.speaker_stream = None
             
         if self.pyaudio:
-            self.pyaudio.terminate()
-            self.pyaudio = None
+            try:
+                self.pyaudio.terminate()
+            except Exception as e:
+                print(f"Error terminating PyAudio: {e}")
+            finally:
+                self.pyaudio = None
+        
+        print("Audio resources cleaned up")
     
     async def disconnect(self):
         """Disconnect from server and clean up"""
-        if self.websocket:
-            await self.websocket.close()
+        print("Disconnecting from server...")
+        
+        try:
+            if self.websocket and not (hasattr(self.websocket, 'closed') and self.websocket.closed):
+                # Send disconnect message
+                try:
+                    message = {
+                        "type": "disconnect",
+                        "timestamp": time.time(),
+                        "sequence": self.sequence,
+                        "payload": {
+                            "reason": "Client disconnecting"
+                        }
+                    }
+                    self.sequence += 1
+                    await self.websocket.send(json.dumps(message))
+                    print("Sent disconnect message")
+                except Exception as e:
+                    print(f"Error sending disconnect message: {e}")
+                
+                # Close the websocket
+                try:
+                    await self.websocket.close()
+                except Exception as e:
+                    print(f"Error closing websocket: {e}")
+        except Exception as e:
+            print(f"Error during disconnect: {e}")
+        finally:
             self.websocket = None
             
-        self.cleanup()
         print("Disconnected from server")
-        
+            
     async def run(self):
         """Run the client"""
         if not await self.connect():
@@ -130,17 +173,34 @@ class SimpleAudioClient:
         try:
             send_task = asyncio.create_task(self.send_audio_loop())
             receive_task = asyncio.create_task(self.receive_audio_loop())
+            
+            # Wait for both tasks to complete
             await asyncio.gather(send_task, receive_task)
         except asyncio.CancelledError:
             print("Tasks cancelled")
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.running = False
             await self.disconnect()
+            self.cleanup()
             
     async def send_audio_loop(self):
         """Continuously read from microphone and send to server"""
         try:
             while self.running and self.websocket:
+                # If we're hanging up, stop sending audio
+                if self.hanging_up:
+                    print("Hanging up - stopped sending audio")
+                    break
+                    
+                # Check if the websocket is closed
+                if hasattr(self.websocket, 'closed') and self.websocket.closed:
+                    print("WebSocket connection closed - stopped sending audio")
+                    break
+                    
                 # Read audio data from microphone
                 try:
                     audio_data = self.mic_stream.read(self.chunk_size, exception_on_overflow=False)
@@ -149,6 +209,7 @@ class SimpleAudioClient:
                     audio_np = np.frombuffer(audio_data, dtype=np.int16)
                     audio_level = np.abs(audio_np).mean()
                     
+                    # Only warn if audio level is very low and not too frequently
                     if audio_level < 10 and self.sequence % 100 == 0:
                         print(f"Warning: Very low audio level ({audio_level:.1f}). Check your microphone.")
                     
@@ -163,8 +224,13 @@ class SimpleAudioClient:
                     }
                     self.sequence += 1
                     
-                    # Send to server
-                    await self.websocket.send(json.dumps(message))
+                    # Send to server - wrap in try/except to handle closed connection
+                    try:
+                        await self.websocket.send(json.dumps(message))
+                    except websockets.exceptions.ConnectionClosed:
+                        print("Connection closed while sending audio - stopping")
+                        self.running = False
+                        break
                     
                     # Pace ourselves according to the chunk duration
                     chunk_duration = self.chunk_size / self.mic_sample_rate
@@ -174,6 +240,9 @@ class SimpleAudioClient:
                     print(f"Error capturing audio: {e}")
                     await asyncio.sleep(0.1)
                     
+        except websockets.exceptions.ConnectionClosed:
+            print("Connection closed - audio sending stopped")
+            self.running = False
         except Exception as e:
             print(f"Error in send loop: {e}")
             self.running = False
@@ -182,8 +251,24 @@ class SimpleAudioClient:
         """Receive audio and other messages from server"""
         try:
             while self.running and self.websocket:
-                # Wait for a message from the server
-                message = await self.websocket.recv()
+                # Check if the websocket is closed
+                if hasattr(self.websocket, 'closed') and self.websocket.closed:
+                    print("WebSocket connection closed - stopped receiving")
+                    self.running = False
+                    break
+                
+                # Wait for a message from the server with a timeout
+                try:
+                    message = await asyncio.wait_for(self.websocket.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # No message received in the timeout period, check if we're still running and try again
+                    if not self.running or (hasattr(self.websocket, 'closed') and self.websocket.closed):
+                        break
+                    continue
+                except websockets.exceptions.ConnectionClosed:
+                    print("Connection closed while waiting for messages")
+                    self.running = False
+                    break
                 
                 try:
                     # Parse the message
@@ -191,112 +276,64 @@ class SimpleAudioClient:
                     
                     # Handle audio playback messages
                     if msg["type"] == "audio_playback":
-                        # Check if this is a chunked message
-                        chunk_info = msg["payload"].get("chunk_info", None)
+                        # Check if this message has the hangup flag
+                        is_hangup = msg["payload"].get("is_hangup", False)
+                        is_final = msg["payload"].get("is_final", False)
                         
-                        if chunk_info:
-                            # This is a chunked message
-                            chunk_index = chunk_info["index"]
-                            total_chunks = chunk_info["total"]
-                            is_wav = chunk_info.get("is_wav", False)
-                            
-                            # Generate a unique ID for this batch of chunks based on timestamp
-                            batch_id = msg.get("timestamp", time.time())
-                            
-                            # Create entry in audio_chunks if it doesn't exist
-                            if batch_id not in self.audio_chunks:
-                                self.audio_chunks[batch_id] = {
-                                    "chunks": [None] * total_chunks,
-                                    "received": 0,
-                                    "total": total_chunks,
-                                    "is_wav": is_wav
-                                }
-                            
-                            # Store this chunk
+                        # If this is a hangup message, mark it for proper handling
+                        if is_hangup:
+                            print("📞 Received audio with hangup flag")
+                            self.hanging_up = True
+                        
+                        # Check if there's audio data to play
+                        if "audio" in msg["payload"]:
+                            # Decode audio data from base64
                             audio_data = base64.b64decode(msg["payload"]["audio"])
-                            self.audio_chunks[batch_id]["chunks"][chunk_index] = audio_data
-                            self.audio_chunks[batch_id]["received"] += 1
                             
-                            # Check if we have all chunks
-                            if self.audio_chunks[batch_id]["received"] == total_chunks:
-                                # Process complete audio
-                                if is_wav:
-                                    # For WAV, each chunk has header. Extract only first header
-                                    wav_header = self.audio_chunks[batch_id]["chunks"][0][:44]
-                                    
-                                    # Combine audio data (removing headers except for first chunk)
-                                    combined_data = wav_header
-                                    for i, chunk in enumerate(self.audio_chunks[batch_id]["chunks"]):
-                                        if i == 0:
-                                            combined_data += chunk[44:]
-                                        else:
-                                            combined_data += chunk[44:]
-                                            
-                                    # Process the complete WAV
-                                    self.process_and_play_audio(combined_data)
-                                else:
-                                    # For non-WAV, just concatenate the chunks
-                                    combined_data = b''.join(self.audio_chunks[batch_id]["chunks"])
-                                    self.process_and_play_audio(combined_data)
-                                    
-                                # Remove this batch from the dictionary
-                                del self.audio_chunks[batch_id]
-                                
-                                # Clean up old batches that might have been incomplete
-                                current_time = time.time()
-                                old_batches = [bid for bid in self.audio_chunks 
-                                              if isinstance(bid, float) and current_time - bid > 30]
-                                for old_id in old_batches:
-                                    del self.audio_chunks[old_id]
-                        else:
-                            # Regular non-chunked audio message
-                            audio_data = base64.b64decode(msg["payload"]["audio"])
-                            self.process_and_play_audio(audio_data)
-                            
+                            # Play it directly - no queuing
+                            if audio_data and len(audio_data) > 0:
+                                print(f"Playing audio: hangup={is_hangup}, final={is_final}, size={len(audio_data)}bytes")
+                                self.process_and_play_audio(audio_data)
+                            else:
+                                print("Received empty audio data")
+                    
                     # Handle status messages (transcription, state updates)
                     elif msg["type"] == "status":
+                        # Check if we're hanging up
+                        if msg["payload"].get("state") == "hanging_up":
+                            print("Server is hanging up")
+                            self.hanging_up = True
+                            
+                        # Handle speech detection
+                        if "is_speech" in msg["payload"]:
+                            is_speech = msg["payload"]["is_speech"]
+                            if is_speech:
+                                print("🎤 Speech detected...")
+                                
+                        # Handle state transitions
+                        if "state" in msg["payload"]:
+                            state = msg["payload"]["state"]
+                            print(f"🔄 State: {state}")
+                            
+                        # Handle transcription
                         if "transcription" in msg["payload"]:
                             text = msg["payload"]["transcription"]["text"]
-                            print(f"🎤 Transcription: {text}")
-                        elif "state" in msg["payload"]:
-                            state = msg["payload"]["state"]
-                            is_speech = msg["payload"].get("is_speech", False)
-                            
-                            if state == "hanging_up":
-                                print("📞 Call ending...")
-                                # Stop sending audio when hanging up
-                                self.running = False
-                                # Drain the speaker buffer before disconnecting
-                                if self.speaker_stream:
-                                    self.speaker_stream.stop_stream()
-                                    self.speaker_stream.start_stream()
-                                # Add a small delay to allow any final audio to play
-                                await asyncio.sleep(0.5)
-                                print("📞 Call ended")
-                                # Disconnect immediately to prevent further messages
-                                await self.disconnect()
-                                # Exit the receive loop
-                                return
-                            elif is_speech:
-                                print("🔴 Recording...")
-                            elif state == "processing":
-                                print("⏱️ Processing...")
-                            else:
-                                print("⚪ Listening...")
+                            print(f"🔊 You said: \"{text}\"")
                     
                     # Handle error messages
                     elif msg["type"] == "error":
-                        print(f"❌ Error from server: {msg['payload']['error']}")
-                        
+                        error = msg["payload"].get("error", "Unknown error")
+                        print(f"❌ Error: {error}")
+                
                 except json.JSONDecodeError:
-                    print(f"Invalid JSON: {message[:100]}...")
+                    print(f"Invalid JSON message")
+                except KeyError as e:
+                    print(f"Missing key in message: {e}")
                 except Exception as e:
                     print(f"Error processing message: {e}")
                     import traceback
                     traceback.print_exc()
-                    
-        except websockets.exceptions.ConnectionClosed:
-            print("Connection to server closed")
+                
         except Exception as e:
             print(f"Error in receive loop: {e}")
             import traceback
@@ -356,9 +393,14 @@ class SimpleAudioClient:
             else:
                 # Assume it's raw PCM at the speaker sample rate
                 pcm_data = audio_data
-                
-            # Play the audio
-            self.speaker_stream.write(pcm_data)
+            
+            # Play the audio directly
+            if self.speaker_stream:
+                print(f"▶️ Playing audio ({len(pcm_data)} bytes)")
+                self.speaker_stream.write(pcm_data)
+                print("✅ Audio playback complete")
+            else:
+                print("Speaker stream unavailable - cannot play audio")
             
         except Exception as audio_err:
             print(f"Error processing audio: {audio_err}")
@@ -380,8 +422,10 @@ async def main():
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     finally:
-        if client.running:
+        # Make sure we clean up
+        if client.websocket:
             await client.disconnect()
+        client.cleanup()
     
 if __name__ == "__main__":
     asyncio.run(main()) 

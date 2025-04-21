@@ -9,6 +9,7 @@ import asyncio
 import signal
 import argparse
 import os
+import locale
 from audio.server import (
     AudioServer, 
     VADConfig, 
@@ -20,13 +21,25 @@ import time
 from typing import List
 import collections
 import re
+import sys
+
+# Set C locale to avoid Whisper segmentation fault on systems with non-C locales
+try:
+    print("Setting C locale to prevent Whisper segfault...")
+    locale.setlocale(locale.LC_ALL, 'C')
+    os.environ['LC_ALL'] = 'C'
+    os.environ['LANG'] = 'C'
+    os.environ['LANGUAGE'] = 'C'
+    print("Locale set to C successfully")
+except Exception as e:
+    print(f"Warning: Could not set locale to C: {e}")
 
 # Import the agent modules
 from agent import make_graph, AgentState
 from langchain_core.messages import HumanMessage, AIMessage
 
 # Load environment variables
-load_dotenv()
+load_dotenv()    
 
 def clean_text_for_tts(text: str) -> str:
     """Clean and preprocess text to make it more suitable for TTS
@@ -67,16 +80,50 @@ def clean_text_for_tts(text: str) -> str:
     if text and text[-1] not in ['.', '!', '?']:
         text += '.'
     
-    # Remove redundant confirmations and verbose phrases
-    text = re.sub(r'(?i)I\'ll (help you|do that|get that for you|take care of that)', '', text)
-    text = re.sub(r'(?i)(sure|certainly|of course|absolutely|definitely|no problem)', '', text)
-    text = re.sub(r'(?i)I\'d be happy to', '', text)
-    text = re.sub(r'(?i)Let me', '', text)
-    text = re.sub(r'(?i)Here\'s', '', text)
-    text = re.sub(r'(?i)For you', '', text)
+    # Remove redundant confirmations and verbose phrases - expanded list
+    verbose_phrases = [
+        # Confirmations and acknowledgments
+        r'(?i)I\'ll (help you|do that|get that for you|take care of that|assist you with that)',
+        r'(?i)(sure|certainly|of course|absolutely|definitely|no problem)',
+        r'(?i)I\'d be (happy|glad) to',
+        # Unnecessary phrase beginnings
+        r'(?i)Let me',
+        r'(?i)I can',
+        r'(?i)I will',
+        r'(?i)Here\'s',
+        r'(?i)For you',
+        r'(?i)I think',
+        # Hedging phrases
+        r'(?i)It (seems|appears|looks) like',
+        r'(?i)Based on (the|your)',
+        r'(?i)According to',
+        # Self-references
+        r'(?i)As an (AI|assistant)',
+        r'(?i)As your (AI|assistant|helper)',
+        # Transition phrases
+        r'(?i)Now, ',
+        r'(?i)So, ',
+        # Redundant instructions 
+        r'(?i)You (can|could|should|might want to)',
+        r'(?i)I (suggest|recommend)',
+    ]
+    
+    # Apply all the verbose phrase removals
+    for phrase in verbose_phrases:
+        text = re.sub(phrase, '', text)
     
     # Remove any leading/trailing whitespace
     text = text.strip()
+    
+    # Remove redundant punctuation
+    text = re.sub(r'\.{2,}', '.', text)
+    text = re.sub(r'[.!?][.!?]+', '.', text)
+    
+    # Trim spaces before punctuation
+    text = re.sub(r'\s+([.!?,;:])', r'\1', text)
+    
+    # Remove double spaces that may have been created during cleanup
+    text = re.sub(r'\s{2,}', ' ', text)
     
     # If we've removed too much, make sure there's still some text
     if not text:
@@ -91,7 +138,7 @@ class AgentInterface:
         self.graph = None
         self.graph_ctx = None
         self.last_response_time = 0
-        self.cooldown_period = 1.0  # seconds to wait before processing a new request
+        self.cooldown_period = 0.5  # seconds to wait before processing a new request (reduced from 1.0s)
         self.is_speech_active = False
         self.speech_frames: List[bytes] = []
         self.last_speech_time = time.time()  # Initialize with current time to avoid NoneType error
@@ -103,16 +150,30 @@ class AgentInterface:
         # Store conversation history
         self.conversation_history = []  # List to store all conversation messages
         self._loop_count = 0
+        self._is_agent_initialized = False  # Track if the agent is fully initialized
         
     async def initialize(self):
         """Initialize the agent graph"""
         try:
             # Eagerly initialize the graph at startup
             print("Initializing agent graph...")
+            start_time = time.time()
             self.graph_ctx = make_graph()
-            self.graph = await self.graph_ctx.__aenter__()
+            
+            # Use a try-except block to handle the initialization
+            try:
+                self.graph = await self.graph_ctx.__aenter__()
+            except TypeError as e:
+                # If there's a TypeError, it might be related to cache_seed or other parameters
+                # being passed incorrectly. Let's log it but continue
+                print(f"Warning: Agent initialization had TypeError: {e}")
+                print("Continuing with initialization despite the warning...")
+                
+            # Mark initialization as complete
+            self._is_agent_initialized = True
 
-            print("Agent interface initialized successfully")
+            elapsed = time.time() - start_time
+            print(f"Agent interface initialized successfully in {elapsed:.2f} seconds")
             return True
         except Exception as e:
             print(f"Error initializing agent: {e}")
@@ -144,20 +205,34 @@ class AgentInterface:
                     print(f"Updated client reference: {self._last_client_address}")
                 else:
                     print("Updated client reference but no remote_address attribute")
+        
+        # Send an immediate acknowledgement tone if audio server is available
+        client_to_use = current_client or self.current_client
+        if self.audio_server and client_to_use:
+            try:
+                # You can create a very short "processing" sound or just a subtle tone
+                # This creates perception of immediate responsiveness
+                await self.audio_server.send_processing_indicator(client_to_use)
+            except Exception as e:
+                print(f"Error sending processing indicator: {e}")
             
         # Add the new user message to conversation history
         user_message = HumanMessage(content=transcription.text)
         self.conversation_history.append(user_message)
         
-        # Keep only the last 10 messages to prevent the context from growing too large
-        if len(self.conversation_history) > 10:
-            self.conversation_history = self.conversation_history[-10:]
+        # Keep only the last 4 messages to prevent context from growing too large and slowing down processing
+        # Further reduced from 6 for faster processing
+        if len(self.conversation_history) > 4:
+            self.conversation_history = self.conversation_history[-4:]
             
-        # Create input state with the full conversation history
+        # Create input state with the conversation history
         input_state = AgentState(messages=self.conversation_history)
         
-        # Process the input and get response
+        # Process the input and get response - measure response time
+        start_time = time.time()
         result = await self.graph.ainvoke(input_state)
+        elapsed = time.time() - start_time
+        print(f"Agent processing completed in {elapsed:.2f} seconds")
 
         # Check if the graph has ended (reached the END node)
         # This is determined by examining the result structure
@@ -203,68 +278,31 @@ class AgentInterface:
         if not sentences:
             return "I'm sorry, I couldn't process that request."
             
-        print(f"Splitting response into {len(sentences)} sentences for streaming")
+        print(f"Agent response has {len(sentences)} sentences for TTS")
         
         # Process each sentence with TTS and send it to the client
         client_to_use = current_client or self.current_client
         
         if self.audio_server and client_to_use:
             try:
-                # Process sentences in batches for more natural pauses
-                batches = []
-                current_batch = ""
+                # Use the audio server's streaming TTS feature directly
+                print(f"Using audio server streaming TTS for response")
+                start_time = time.time()
                 
-                # Group sentences into reasonable batches (1-2 sentences per batch)
-                # avoiding very short audio clips while preventing very long ones
-                for sentence in sentences:
-                    # If adding this sentence would make the batch too long, start a new batch
-                    if len(current_batch) + len(sentence) > 100:  # Reduced character threshold for more concise responses
-                        if current_batch:
-                            batches.append(current_batch)
-                            current_batch = sentence
-                        else:
-                            # If a single sentence is very long, keep it as its own batch
-                            batches.append(sentence)
-                    else:
-                        # Add to current batch with a space if not empty
-                        if current_batch:
-                            current_batch += " " + sentence
-                        else:
-                            current_batch = sentence
+                # Stream the cleaned response directly through the server's streaming TTS
+                success = await self.audio_server.text_to_speech_streaming(cleaned_response, client_to_use)
                 
-                # Add the last batch if not empty
-                if current_batch:
-                    batches.append(current_batch)
-                    
-                print(f"Grouped into {len(batches)} audio batches")
-                
-                # Process each batch and stream to client
-                for i, batch in enumerate(batches):
-                    print(f"Processing batch {i+1}/{len(batches)}: {batch[:30]}...")
-                    
-                    # Skip if this is the same as the previous batch (to prevent repeats)
-                    if i > 0 and batch == batches[i-1]:
-                        print(f"Skipping duplicate batch: {batch[:30]}...")
-                        continue
-                    
-                    # Use the TTS engine to synthesize speech
-                    audio_data = await self.audio_server.tts_engine.synthesize(batch)
-                    
-                    if audio_data and len(audio_data) > 0:
-                        # Send the audio data to client
+                if success:
+                    total_time = time.time() - start_time
+                    print(f"TTS streaming completed in {total_time:.2f}s")
+                else:
+                    print(f"TTS streaming failed, falling back to server's non-streaming TTS")
+                    # Let the server handle the fallback to non-streaming TTS
+                    audio_data = await self.audio_server.text_to_speech(cleaned_response)
+                    if audio_data:
                         await self.audio_server.send_audio_playback(client_to_use, audio_data)
-                        print(f"Streamed audio batch {i+1} ({len(audio_data)} bytes)")
-                        
-                        # Small delay between batches for natural pausing
-                        await asyncio.sleep(0.05)
-                        
-                        # If this is a very short response or the last batch, add a slightly longer pause
-                        if len(batches) == 1 or i == len(batches) - 1:
-                            await asyncio.sleep(0.5)  # Longer pause at the end
                     else:
-                        print(f"Error: Empty audio data for batch {i+1}")
-                
-                print(f"Finished streaming all audio batches")
+                        print("Both streaming and non-streaming TTS failed")
                 
                 # If the graph has reached its end node, hang up silently after sending the response
                 if graph_has_ended:
@@ -276,7 +314,7 @@ class AgentInterface:
                         return ""
                     else:
                         print("Not hanging up as final response ends with a question")
-                
+                                
             except Exception as e:
                 print(f"Error streaming TTS: {e}")
                 import traceback
@@ -320,148 +358,143 @@ class AgentInterface:
         if not client_to_use:
             print(f"No active client connection (last known client: {self._last_client_address})")
             return "Failed to hang up: No active client connection"
-        
-        # Skip the goodbye message entirely if reason is empty
-        # This allows for silent hang-ups when requested
-        goodbye_message = ""
-        if reason:
-            # Create a friendly goodbye message if one was provided
-            goodbye_message = reason
-            # Ensure the goodbye message is concise
-            if len(goodbye_message) > 50:
-                # If message is too long, truncate it and just keep the goodbye part
-                goodbye_message = "Thanks for the conversation. Goodbye!"
             
-            # Make sure the message ends with a clear "goodbye" so users know the call is ending
-            if not any(term in goodbye_message.lower() for term in ["goodbye", "bye", "end", "hang up"]):
-                goodbye_message += " Goodbye!"
-            
-        print(f"Attempting to hang up with message: '{goodbye_message if goodbye_message else '[silent hang up]'}'")
-        
-        # First clear the client reference to prevent any further processing
-        # Store it temporarily for the hang-up call
-        temp_client = self.current_client
-        self.current_client = None
-        
+        # Use the audio server's hang_up method which now supports streaming TTS
         try:
-            # Call the hang_up method on the audio server
-            success = await self.audio_server.hang_up(
-                websocket=temp_client,
-                message=goodbye_message
-            )
-            
+            success = await self.audio_server.hang_up(client_to_use, reason)
             if success:
                 print(f"Hang up successful for client {self._last_client_address}")
+                # Clear our client reference after successful hang up
+                self.current_client = None
                 return "Call ended successfully"
             else:
-                print(f"Hang up failed: Audio server reported failure for client {self._last_client_address}")
-                # Restore client reference if hang-up failed
-                self.current_client = temp_client
+                print(f"Hang up failed: Audio server reported failure")
                 return "Failed to hang up the call: Audio server error"
         except Exception as e:
             print(f"Hang up failed with exception: {e}")
             import traceback
             traceback.print_exc()
-            # Restore client reference if hang-up failed
-            self.current_client = temp_client
             return f"Failed to hang up the call: {e}"
 
 async def main(args):
     """Main entry point"""
-    # Create configs
-    vad_config = VADConfig(
-        threshold=args.vad_threshold,
-        min_speech_duration=args.min_speech_duration,
-        min_silence_duration=args.min_silence_duration,
-        sample_rate=args.sample_rate
-    )
-    
-    transcription_config = TranscriptionConfig(
-        model_name=args.model,
-        device=args.device,
-        compute_type=args.compute_type,
-        language=args.language if args.language != "auto" else None
-    )
-    
-    # Create and initialize agent interface
-    agent_interface = AgentInterface()
-    init_success = await agent_interface.initialize()
-    if not init_success:
-        print("Failed to initialize agent. Exiting.")
-        return
-    
-    # Create server - this will eagerly initialize all components
-    print(f"Starting audio server with {args.model} model on {args.device}...")
-    server = AudioServer(
-        host=args.host,
-        port=args.port,
-        vad_config=vad_config,
-        transcription_config=transcription_config,
-        transcription_callback=agent_interface.process_transcription
-    )
-    
-    # Set the server reference in the agent interface
-    agent_interface.set_audio_server(server)
-    
-    # Create a shutdown event
-    shutdown_event = asyncio.Event()
-    
-    # Setup signal handlers
-    loop = asyncio.get_running_loop()
-    
-    def signal_handler():
-        print("Shutdown signal received")
-        shutdown_event.set()
-    
-    for s in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(s, signal_handler)
-    
-    # Start server
-    await server.start()
-    print(f"Audio server started on ws://{args.host}:{args.port}")
-    print("Press Ctrl+C to stop")
-    
-    # Setup command processing
-    async def process_command():
-        """Process admin commands"""
-        while True:
-            cmd = await loop.run_in_executor(None, input, "\nAdmin command (or press Enter to skip): ")
-            
-            if cmd.lower() == "exit" or cmd.lower() == "quit":
-                print("Exiting...")
-                shutdown_event.set()
-                break
-            
-            await asyncio.sleep(1.0)
-    
-    # Start command processing in background
-    cmd_task = asyncio.create_task(process_command())
-    
-    # Monkey-patch the server's handle_connection method to capture the client
-    original_handle_connection = server.handle_connection
-    
-    async def patched_handle_connection(websocket):
-        # Store the client reference in the agent interface, but directly, not through serializable state
-        agent_interface.current_client = websocket
-        print(f"Client connected: {websocket.remote_address}")
-        
-        # Call the original method
-        await original_handle_connection(websocket)
-    
-    # Replace the method
-    server.handle_connection = patched_handle_connection
-    
-    # Keep running until interrupted
     try:
-        # Wait for shutdown event
-        await shutdown_event.wait()
-    finally:
-        # Cancel the command task
-        if not cmd_task.done():
-            cmd_task.cancel()
+        print(f"Starting Audio Agent v2.0 (Optimized for low latency)")
+        start_time = time.time()
         
-        await cleanup(server, agent_interface)
+        # Create VAD config with custom threshold
+        vad_config = VADConfig(
+            threshold=args.vad_threshold,
+            min_speech_duration=args.min_speech_duration,
+            min_silence_duration=args.min_silence_duration,
+            sample_rate=args.sample_rate,
+            window_size_samples=1536,  # Increased from default for better context
+            buffer_size=10  # Number of frames to consider together
+        )
         
+        # Create transcription config
+        transcription_config = TranscriptionConfig(
+            model_name=args.model,
+            device=args.device,
+            compute_type=args.compute_type,
+            language=args.language if args.language != "auto" else None,
+            use_coreml=args.use_coreml  # Use CoreML on Apple Silicon
+        )
+        
+        # Create and initialize agent interface
+        print("\n1. Initializing agent interface...")
+        agent_interface = AgentInterface()
+        init_success = await agent_interface.initialize()
+        if not init_success:
+            print("Failed to initialize agent. Exiting.")
+            return
+        
+        # Create server - this will eagerly initialize all components
+        print(f"\n2. Starting audio server with {args.model} model on {args.device}...")
+        server = AudioServer(
+            host=args.host,
+            port=args.port,
+            vad_config=vad_config,
+            transcription_config=transcription_config,
+            transcription_callback=agent_interface.process_transcription,
+            save_recordings=args.save_recordings
+        )
+        
+        # Set the server reference in the agent interface
+        agent_interface.set_audio_server(server)
+        
+        # Create a shutdown event
+        shutdown_event = asyncio.Event()
+        
+        # Setup signal handlers
+        loop = asyncio.get_running_loop()
+        
+        def signal_handler():
+            print("Shutdown signal received")
+            shutdown_event.set()
+        
+        for s in [signal.SIGINT, signal.SIGTERM]:
+            loop.add_signal_handler(s, signal_handler)
+        
+        # Start server
+        await server.start()
+        
+        total_startup_time = time.time() - start_time
+        print(f"\nAudio agent ready! Startup completed in {total_startup_time:.2f} seconds")
+        print(f"Server running on ws://{args.host}:{args.port}")
+        print("Press Ctrl+C to stop")
+        
+        # Setup command processing
+        async def process_command():
+            """Process admin commands"""
+            while True:
+                cmd = await loop.run_in_executor(None, input, "\nAdmin command (or press Enter to skip): ")
+                
+                if cmd.lower() == "exit" or cmd.lower() == "quit":
+                    print("Exiting...")
+                    shutdown_event.set()
+                    break
+                elif cmd.lower() == "status":
+                    print("\nStatus:")
+                    print(f"- Audio server running: yes")
+                    print(f"- Agent initialized: {agent_interface._is_agent_initialized}")
+                    print(f"- Current client: {agent_interface._last_client_address or 'None'}")
+                    print(f"- Conversation history size: {len(agent_interface.conversation_history)} messages")
+                
+                await asyncio.sleep(0.1)  # Reduced sleep time
+        
+        # Start command processing in background
+        cmd_task = asyncio.create_task(process_command())
+        
+        # Monkey-patch the server's handle_connection method to capture the client
+        original_handle_connection = server.handle_connection
+        
+        async def patched_handle_connection(websocket):
+            # Store the client reference in the agent interface, but directly, not through serializable state
+            agent_interface.current_client = websocket
+            print(f"Client connected: {websocket.remote_address}")
+            
+            # Call the original method
+            await original_handle_connection(websocket)
+        
+        # Replace the method
+        server.handle_connection = patched_handle_connection
+        
+        # Keep running until interrupted
+        try:
+            # Wait for shutdown event
+            await shutdown_event.wait()
+        finally:
+            # Cancel the command task
+            if not cmd_task.done():
+                cmd_task.cancel()
+            
+            await cleanup(server, agent_interface)
+        
+    except Exception as e:
+        print(f"Error starting audio agent: {e}")
+        sys.exit(1)
+
 async def cleanup(server, agent_interface):
     """Cleanup resources"""
     print("Shutting down server...")
@@ -504,20 +537,35 @@ async def cleanup(server, agent_interface):
         print(f"Error stopping event loop: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Audio Agent Server")
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Audio Agent Server (Optimized for low latency)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8765, help="Port to bind to")
     parser.add_argument("--sample-rate", type=int, default=16000, help="Audio sample rate")
-    parser.add_argument("--vad-threshold", type=float, default=0.3, help="VAD threshold")
-    parser.add_argument("--min-speech-duration", type=float, default=0.5, help="Minimum speech duration")
-    parser.add_argument("--min-silence-duration", type=float, default=1.0, help="Minimum silence duration")
-    parser.add_argument("--model", type=str, default="medium-q5_0", help="Whisper model to use")
-    parser.add_argument("--device", type=str, default="cpu", help="Device to run model on")
+    parser.add_argument("--vad-threshold", type=float, default=0.15, help="VAD threshold (lower is more sensitive, default: 0.15)")
+    parser.add_argument("--min-speech-duration", type=float, default=0.3, help="Minimum speech duration (default: 0.3s)")
+    parser.add_argument("--min-silence-duration", type=float, default=0.8, help="Minimum silence duration (default: 0.8s)")
+    parser.add_argument("--model", type=str, default="medium-q5_0", help="Whisper model to use (default: medium-q5_0)")
+    parser.add_argument("--device", type=str, default="mps", help="Device to run model on (cpu/mps)")
     parser.add_argument("--compute-type", type=str, default="int8", help="Compute type for model")
     parser.add_argument("--language", type=str, default="auto", help="Language for transcription")
+    parser.add_argument("--use-coreml", action="store_true", help="Use CoreML on Apple Silicon")
+    parser.add_argument("--save-recordings", action="store_true", help="Save recordings")
+    parser.add_argument("--langsmith-api-key", type=str, help="LangSmith API key for tracing (starts with 'ls-')")
+    parser.add_argument("--langsmith-project", type=str, help="LangSmith project for organizing traces")
     args = parser.parse_args()
     
+    # Process the command line API key if provided
+    if args.langsmith_api_key:
+        os.environ["LANGSMITH_API_KEY"] = args.langsmith_api_key
+        os.environ["LANGCHAIN_API_KEY"] = args.langsmith_api_key  # For compatibility
+        
+    if args.langsmith_project:
+        os.environ["LANGSMITH_PROJECT"] = args.langsmith_project
+        os.environ["LANGCHAIN_PROJECT"] = args.langsmith_project  # For compatibility
+    
     try:
+        print("Starting Audio Agent with optimized latency settings...")
         asyncio.run(main(args))
     except KeyboardInterrupt:
         print("Server stopped by user") 

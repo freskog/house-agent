@@ -8,6 +8,8 @@ import numpy as np
 import time
 from typing import Optional, Dict, List, Tuple, Any, Union
 import sys
+import collections
+from langsmith import traceable
 
 # Cache for models
 _vad_cache = {
@@ -19,14 +21,15 @@ class VADConfig:
     """Configuration for VAD"""
     def __init__(self, 
                  model_name: str = "silero_vad",
-                 threshold: float = 0.4,
+                 threshold: float = 0.5,  # Dramatically increased from 0.2 to 0.5 to be much less sensitive
                  sample_rate: int = 16000,
-                 min_speech_duration: float = 0.25,  # Reduced to catch brief speech
-                 min_silence_duration: float = 1.0,  # Seconds of silence before cutting off
-                 window_size_samples: int = 512,    # Process in small windows for quick response
-                 speech_pad_ms: int = 150,          # Add padding around speech for smoother detection
-                 overlap_factor: float = 0.1,       # Overlap between processing windows
-                 buffer_size: int = 30):            # Number of past frames to keep for context
+                 min_speech_duration: float = 0.8,  # Doubled from 0.4 to require longer speech segments
+                 min_silence_duration: float = 1.0,  # Increased from 0.7 to require more definitive silence
+                 window_size_samples: int = 1536,
+                 speech_pad_ms: int = 80,           # Further reduced from 120 to minimize padding
+                 overlap_factor: float = 0.1,
+                 buffer_size: int = 8,              # Reduced from 10 to accumulate less potential noise
+                 verbose: bool = False):            # New parameter to control logging
         self.model_name = model_name
         self.threshold = threshold
         self.sample_rate = sample_rate
@@ -36,6 +39,7 @@ class VADConfig:
         self.speech_pad_ms = speech_pad_ms
         self.overlap_factor = overlap_factor
         self.buffer_size = buffer_size
+        self.verbose = verbose
 
 class VADResult:
     """Result from VAD processing"""
@@ -77,6 +81,7 @@ def load_silero_vad():
         print(f"Error loading Silero VAD model: {e}")
         raise
 
+@traceable(run_type="chain", name="VAD_Get_Speech_Timestamps")
 def get_speech_timestamps(audio_tensor, model, sampling_rate=16000, 
                           threshold=0.3, min_speech_duration_ms=250, 
                           min_silence_duration_ms=100, speech_pad_ms=30,
@@ -163,7 +168,6 @@ class VADHandler:
         self.config = config or VADConfig()
         self.vad_model = None
         self.initialized = False
-        self.buffer = []
         self.last_is_speech = False
         self.last_confidence = 0.0
         self.silence_start = time.time()  # Initialize with current time to avoid NoneType error
@@ -171,7 +175,12 @@ class VADHandler:
         
         # Add a buffer for continuous audio processing
         self.audio_buffer = np.array([], dtype=np.int16)
-        self.overlap_samples = int(self.config.window_size_samples * self.config.overlap_factor)
+        
+        # Add a chunk buffer for aggregating multiple audio chunks for better speech detection
+        self.chunk_buffer = collections.deque(maxlen=self.config.buffer_size)
+        
+        # Frame counter for logging
+        self._frame_counter = 0
         
         # Initialize eagerly
         self.initialize()
@@ -182,11 +191,13 @@ class VADHandler:
             return True
             
         try:
-            print("Loading VAD model...")
+            if self.config.verbose:
+                print("Loading VAD model...")
             # Use our inlined load_silero_vad function
             self.vad_model = load_silero_vad()
             self.initialized = True
-            print("VAD model loaded successfully")
+            if self.config.verbose:
+                print("VAD model loaded successfully")
             return True
         except Exception as e:
             print(f"Error initializing VAD model: {e}")
@@ -196,25 +207,42 @@ class VADHandler:
         """Process an audio chunk and detect speech"""
         if not self.initialized:
             if not self.initialize():
+                print("WARNING: VAD not initialized in process_chunk")
                 return VADResult()
         
         try:
+            # Increment frame counter
+            self._frame_counter += 1
+            
             # Convert bytes to numpy array
             audio_np = np.frombuffer(audio_chunk, dtype=np.int16)
             
+            # Calculate RMS value to check if audio is too quiet to process
+            if len(audio_np) > 0:
+                audio_rms = np.sqrt(np.mean(np.power(audio_np.astype(np.float32), 2)))
+                
+                # Skip very quiet frames entirely (RMS < 200 is quite quiet)
+                if audio_rms < 200:
+                    return VADResult(is_speech=False, confidence=0.0)
+            
+            # Add to chunk buffer for better context
+            if len(audio_np) > 0:
+                self.chunk_buffer.append(audio_np)
+            else:
+                print("WARNING: Empty audio chunk received")
+                return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence * 0.9)
+            
             # Check for incorrect audio length/sample rate issues
-            # If the audio chunk has unusually many samples for a small chunk, 
-            # it might be recorded at a higher rate than we expect
-            expected_samples = self.config.window_size_samples  # Expect roughly this many samples
+            expected_samples = self.config.window_size_samples
             actual_samples = len(audio_np)
             
             # If the chunk is significantly larger than expected, we may need to downsample
             if actual_samples > 2.5 * expected_samples:
-                print(f"WARNING: Large audio chunk detected ({actual_samples} samples, expected ~{expected_samples})")
-                print("This might indicate a sample rate mismatch. Attempting to correct...")
+                # Existing resampling code preserved here
+                if self.config.verbose:
+                    print(f"WARNING: Large audio chunk detected ({actual_samples} samples, expected ~{expected_samples})")
+                    print("This might indicate a sample rate mismatch. Attempting to correct...")
                 
-                # Guess the source sample rate based on the ratio
-                # Common rates are 44100, 48000, etc.
                 likely_source_rate = None
                 for rate in [44100, 48000, 96000, 22050]:
                     ratio = rate / self.config.sample_rate
@@ -223,7 +251,8 @@ class VADHandler:
                         break
                 
                 if likely_source_rate:
-                    print(f"Audio appears to be at {likely_source_rate}Hz instead of {self.config.sample_rate}Hz")
+                    if self.config.verbose:
+                        print(f"Audio appears to be at {likely_source_rate}Hz instead of {self.config.sample_rate}Hz")
                     
                     # Resample to the correct rate
                     import scipy.signal as signal
@@ -231,135 +260,103 @@ class VADHandler:
                     resampled = signal.resample(audio_np, target_samples)
                     audio_np = np.int16(resampled)
                     audio_chunk = audio_np.tobytes()
-                    print(f"Resampled from {actual_samples} to {len(audio_np)} samples")
+                    if self.config.verbose:
+                        print(f"Resampled from {actual_samples} to {len(audio_np)} samples")
                     
-                    # Save a debug copy of the resampled audio
-                    try:
-                        import wave
-                        import os
-                        from datetime import datetime
+                    # Update the buffer with the resampled audio
+                    self.chunk_buffer[-1] = audio_np
+            
+            # Process multiple chunks together for better context
+            # Only if we have enough chunks or the audio is loud
+            audio_mean = np.mean(np.abs(audio_np))
+            is_loud = audio_mean > 500  # Higher threshold for what's considered a loud frame
+            
+            # Default values in case processing fails
+            is_speech = False
+            confidence = 0.0
+            timestamps = []
+            
+            if len(self.chunk_buffer) >= 3 or is_loud:
+                # Combine chunks for more context
+                combined_audio = np.concatenate(list(self.chunk_buffer))
+                audio_tensor = torch.tensor(combined_audio)
+                
+                # Process through VAD
+                try:
+                    # For better accuracy, we use get_speech_timestamps when possible
+                    timestamps = get_speech_timestamps(
+                        audio_tensor,
+                        self.vad_model,
+                        sampling_rate=self.config.sample_rate,
+                        threshold=self.config.threshold,
+                        min_speech_duration_ms=int(self.config.min_speech_duration * 1000),
+                        min_silence_duration_ms=int(self.config.min_silence_duration * 1000),
+                        speech_pad_ms=self.config.speech_pad_ms,
+                        return_seconds=True
+                    )
+                    
+                    # Calculate confidence as proportion of audio marked as speech
+                    if len(timestamps) > 0:
+                        total_duration = len(combined_audio) / self.config.sample_rate
+                        speech_duration = sum((ts['end'] - ts['start']) for ts in timestamps)
+                        confidence = min(1.0, speech_duration / total_duration if total_duration > 0 else 0)
                         
-                        # Create debug directory
-                        debug_dir = os.path.join(os.getcwd(), "debug_audio")
-                        os.makedirs(debug_dir, exist_ok=True)
+                        # More aggressive confidence threshold
+                        is_speech = confidence > 0.4  # Require at least 40% of the audio to be speech
                         
-                        # Generate filename
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = os.path.join(debug_dir, f"vad_resampled_{timestamp}.wav")
-                        
-                        with wave.open(filename, 'wb') as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(self.config.sample_rate)
-                            wf.writeframes(audio_chunk)
-                        print(f"Saved resampled audio to {filename}")
-                    except Exception as e:
-                        print(f"Error saving resampled audio: {e}")
+                        if is_speech:
+                            confidence = max(0.7, confidence)  # Higher minimum confidence when speech is detected
+                            
+                            # Only log when speech is detected if verbose is enabled
+                            if self.config.verbose:
+                                print(f"Debug: SPEECH DETECTED! Confidence: {confidence:.2f}, Timestamps: {timestamps}")
+                    
+                    # Update state with results - include hysteresis logic only here
+                    if is_speech:
+                        self.last_is_speech = True
+                        self.last_confidence = confidence
+                        self.speech_start = time.time()
+                    else:
+                        # Only transition to not-speech after a delay (hysteresis)
+                        if self.last_is_speech and (time.time() - self.speech_start) < self.config.min_speech_duration:
+                            # Too soon after speech started, don't transition yet
+                            is_speech = True
+                            confidence = self.last_confidence * 0.8  # Decay confidence
+                        else:
+                            self.last_is_speech = False
+                            self.last_confidence = 0.0
+                            self.silence_start = time.time()
+                    
+                    # Return result
+                    result = VADResult(
+                        is_speech=is_speech,
+                        confidence=confidence,
+                        timestamps=timestamps
+                    )
+                    
+                    return result
+                    
+                except Exception as e:
+                    print(f"Error in VAD processing: {e}")
+                    if self.config.verbose:
+                        import traceback
+                        traceback.print_exc()
+                    # Use fallback values which were initialized earlier
             
-            # Add to buffer for continuous processing
-            self.audio_buffer = np.append(self.audio_buffer, audio_np)
-            
-            # Keep buffer at a reasonable size, but maintain overlapping context
-            max_buffer_samples = self.config.buffer_size * self.config.window_size_samples
-            if len(self.audio_buffer) > max_buffer_samples:
-                # Keep a portion of the buffer for context
-                ctx_samples = min(max_buffer_samples // 2, 4096)
-                self.audio_buffer = self.audio_buffer[-max_buffer_samples:]
-            
-            # Convert to float and normalize
-            audio_float = self.audio_buffer.astype(np.float32) / 32768.0
-            
-            # Convert to PyTorch tensor
-            audio_tensor = torch.tensor(audio_float)
-            
-            # Check if we have enough data for processing
-            if len(audio_tensor) < self.config.window_size_samples:
-                # Not enough data yet
-                return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence)
-            
-            # Use our inlined get_speech_timestamps function
-            timestamps = get_speech_timestamps(
-                audio_tensor, 
-                self.vad_model,
-                sampling_rate=self.config.sample_rate,
-                threshold=self.config.threshold,
-                min_speech_duration_ms=int(self.config.min_speech_duration * 1000),
-                min_silence_duration_ms=int(self.config.min_silence_duration * 1000),
-                speech_pad_ms=self.config.speech_pad_ms,
-                return_seconds=True
-            )
-            
-            # Determine if speech is present based on timestamps
-            is_speech = len(timestamps) > 0
-            
-            # Calculate confidence
-            confidence = 0.5  # Default confidence
-            
-            # If speech detected, use the latest timestamp's end time
-            # to determine if it's current
-            if is_speech:
-                # Get the latest timestamp
-                latest = timestamps[-1]
-                
-                # Check if the speech is current (end is close to the end of the buffer)
-                end_sample = int(latest["end"] * self.config.sample_rate)
-                buffer_end = len(self.audio_buffer)
-                
-                # If end is within 0.5 seconds of buffer end, it's current speech
-                if buffer_end - end_sample < 0.5 * self.config.sample_rate:
-                    confidence = 0.95
-                else:
-                    # It's old speech, not current
-                    is_speech = False
-                    confidence = 0.1
-                
-                # Update speech start if needed
-                if not self.speech_start and is_speech:
-                    self.speech_start = time.time()
-                    self.silence_start = None
-            else:
-                # If no speech detected
-                if self.last_is_speech:
-                    # Just transitioned to silence
-                    self.silence_start = time.time()
-                elif self.silence_start:
-                    # Check if silence has been long enough to confirm no speech
-                    silence_duration = time.time() - self.silence_start
-                    if silence_duration < self.config.min_silence_duration:
-                        # Not silent long enough to be sure, maintain speech state
-                        # This helps prevent choppy detections
-                        is_speech = self.last_is_speech
-                        confidence = max(0.6 - (silence_duration / self.config.min_silence_duration * 0.4), 0.2)
-                
-                # Reset speech start if we're sure it's silent
-                if not is_speech and self.silence_start and time.time() - self.silence_start > self.config.min_silence_duration:
-                    self.speech_start = None
-            
-            # Store state for next call
-            self.last_is_speech = is_speech
-            self.last_confidence = confidence
-            
-            # Return result
-            return VADResult(
-                is_speech=is_speech,
-                confidence=confidence,
-                timestamps=[{
-                    "start": ts["start"], 
-                    "end": ts["end"]
-                } for ts in timestamps]
-            )
+            # If we don't have enough chunks yet or processing failed, return results based on state
+            return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence * 0.9)
             
         except Exception as e:
-            print(f"Error processing audio chunk: {e}")
+            print(f"Error in VAD handler: {e}")
             import traceback
             traceback.print_exc()
-            return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence)
-            
+            return VADResult()
+    
     def reset(self):
         """Reset the VAD state"""
-        self.buffer = []
-        self.audio_buffer = np.array([], dtype=np.int16)
+        self.chunk_buffer.clear()
         self.last_is_speech = False
         self.last_confidence = 0.0
         self.silence_start = time.time()
-        self.speech_start = time.time() 
+        self.speech_start = time.time()
+        self.audio_buffer = np.array([], dtype=np.int16) 

@@ -11,6 +11,7 @@ import time
 from typing import Optional, List, Dict, Any, Tuple
 import re
 import torch
+from langsmith import traceable
 
 # Import Kokoro TTS
 from kokoro import KPipeline
@@ -73,48 +74,99 @@ class TTSEngine:
             self.initialized = False
             
     def _preprocess_text(self, text):
-        """Preprocess text for TTS - sentence splitting, normalization etc."""
+        """Preprocess text for TTS - sentence splitting, normalization etc.
+        
+        This method splits text into natural speech units (sentences, phrases at commas, etc.)
+        to allow real-time streaming of audio as soon as each segment is processed.
+        
+        Returns smaller chunks for faster initial processing, especially for long texts.
+        """
         try:
-            # First protect common abbreviations from being split
+            # First protect common abbreviations from being split incorrectly
             protected_text = text
             abbreviations = ["Mr.", "Mrs.", "Dr.", "Ph.D.", "M.D.", "B.A.", "B.S.", "M.S.", "i.e.", "e.g.", "U.S.A.", "U.K.", "St."]
             
             for abbr in abbreviations:
                 protected_text = protected_text.replace(abbr, abbr.replace(".", "{{DOT}}"))
             
-            # Now split on sentence boundaries
-            split_pattern = r'(?<=[.!?])\s+'
-            sentences = re.split(split_pattern, protected_text)
+            # Split on sentence boundaries first (periods, exclamation marks, question marks)
+            sentence_boundaries = r'(?<=[.!?])\s+'
+            sentences = re.split(sentence_boundaries, protected_text)
             
-            # Restore the protected abbreviations
-            sentences = [s.replace("{{DOT}}", ".") for s in sentences]
+            # Further split long sentences at natural pauses (commas, semicolons, colons, dashes)
+            final_segments = []
+            natural_pause_boundaries = r'(?<=[,;:\-–—])\s+'
             
-            # Handle edge cases: very long sentences may need further splitting
-            max_sentence_length = 200  # Characters
-            final_sentences = []
+            # Use smaller chunks for faster initial output
+            # Shorter segments = faster first-chunk time
+            max_segment_length = 80  # Reduced from 120 for faster processing
             
-            for s in sentences:
-                if len(s) > max_sentence_length:
-                    # Split long sentences at commas or other natural breaks
-                    comma_splits = re.split(r'(?<=,|\;)\s+', s)
-                    if len(comma_splits) > 1 and max(len(cs) for cs in comma_splits) < max_sentence_length:
-                        final_sentences.extend(comma_splits)
-                    else:
-                        # Still too long, use a simple length-based split as last resort
-                        final_sentences.extend([s[i:i+max_sentence_length] for i in range(0, len(s), max_sentence_length)])
+            for sentence in sentences:
+                # Restore the protected abbreviations
+                sentence = sentence.replace("{{DOT}}", ".")
+                
+                if len(sentence) <= max_segment_length:
+                    # If sentence is a reasonable length, keep as is
+                    final_segments.append(sentence)
                 else:
-                    final_sentences.append(s)
+                    # For long sentences, split at natural pause points
+                    pause_segments = re.split(natural_pause_boundaries, sentence)
+                    
+                    # If split resulted in reasonable segments, use them
+                    if all(len(seg) <= max_segment_length for seg in pause_segments):
+                        final_segments.extend(pause_segments)
+                    else:
+                        # For still-too-long segments, use a fallback approach - split by length
+                        for segment in pause_segments:
+                            if len(segment) <= max_segment_length:
+                                final_segments.append(segment)
+                            else:
+                                # Use a simple chunk-by-length approach for very long text with no natural breaks
+                                chunks = []
+                                for i in range(0, len(segment), max_segment_length):
+                                    chunk = segment[i:i+max_segment_length]
+                                    # Try to avoid splitting words if possible
+                                    if i+max_segment_length < len(segment) and not segment[i+max_segment_length].isspace():
+                                        # Find the last space in this chunk
+                                        last_space = chunk.rfind(' ')
+                                        if last_space > max_segment_length * 0.5:  # Only adjust if space is reasonably positioned
+                                            chunks.append(chunk[:last_space])
+                                            # Adjust start of next chunk
+                                            i = i + last_space + 1
+                                            continue
+                                    chunks.append(chunk)
+                                final_segments.extend(chunks)
             
-            print(f"Split text into {len(final_sentences)} sentences")
-            return final_sentences if final_sentences else [text]
+            # Filter out empty segments and trim whitespace
+            final_segments = [s.strip() for s in final_segments if s.strip()]
+            
+            # For very long texts (like reading out article content), prioritize the first few segments
+            # This makes the system respond faster with the beginning of the content
+            if len(final_segments) > 10:
+                # Rearrange segments to prioritize the first few
+                # Take first 3 segments, then every other segment until end
+                # This helps initial chunks get generated and sent faster
+                prioritized_segments = final_segments[:3]
+                prioritized_segments.extend(final_segments[3::2])  # Every other segment after the first 3
+                prioritized_segments.extend(final_segments[4::2])  # The remaining segments
+                final_segments = prioritized_segments
+            
+            print(f"Split text into {len(final_segments)} segments for natural speech flow")
+            return final_segments if final_segments else [text]
         
         except Exception as e:
             print(f"Error during text preprocessing: {e}")
+            import traceback
+            traceback.print_exc()
             # Safest fallback is to return the whole text as one chunk
             return [text]
     
+
     async def _generate_audio(self, text):
-        """Generate audio from text using Kokoro pipeline"""
+        """Generate audio from text using Kokoro pipeline
+        
+        Optimized for single sentences or small chunks of text.
+        """
         if not self.pipeline:
             print("Kokoro pipeline not initialized")
             return None
@@ -123,26 +175,39 @@ class TTSEngine:
             # Use event loop to run CPU-bound TTS in a thread pool
             loop = asyncio.get_event_loop()
             
-            # Define the function to run in the thread pool
+            # Define the function to run in the thread pool - optimized for single sentence
             def process_text():
-                all_audio = []
-                # Create a generator from the pipeline
-                generator = self.pipeline(text, voice=self.voice, speed=self.speed)
-                
-                # Process all outputs from the generator
-                for i, (gs, ps, audio) in enumerate(generator):
-                    all_audio.append(audio)
-                
-                # Combine all audio segments if needed
-                if len(all_audio) > 1:
-                    return np.concatenate(all_audio)
-                elif len(all_audio) == 1:
-                    return all_audio[0]
-                else:
+                try:
+                    # Create a generator from the pipeline
+                    generator = self.pipeline(text, voice=self.voice, speed=self.speed)
+                    
+                    # Collect audio segments for this sentence
+                    all_audio = []
+                    
+                    # Process all outputs from the generator
+                    for _, _, audio in generator:
+                        all_audio.append(audio)
+                    
+                    # Combine audio segments
+                    if len(all_audio) > 1:
+                        return np.concatenate(all_audio)
+                    elif len(all_audio) == 1:
+                        return all_audio[0]
+                    else:
+                        return None
+                except Exception as e:
+                    print(f"Error in TTS pipeline: {e}")
                     return None
             
-            # Run in thread pool
-            audio_data = await loop.run_in_executor(None, process_text)
+            # Run in thread pool with a timeout to prevent hanging
+            try:
+                audio_data = await asyncio.wait_for(
+                    loop.run_in_executor(None, process_text),
+                    timeout=10.0  # 10 second timeout per sentence
+                )
+            except asyncio.TimeoutError:
+                print(f"Timeout generating audio for: '{text[:30]}...'")
+                return None
             
             if audio_data is None:
                 print("No audio generated")
@@ -160,6 +225,7 @@ class TTSEngine:
             traceback.print_exc()
             return None
             
+    @traceable(run_type="chain", name="TTS_Synthesize_Speech")
     async def synthesize(self, text):
         """Convert text to speech and return audio data
         
@@ -169,10 +235,19 @@ class TTSEngine:
         Returns:
             bytes: Audio data (WAV format)
         """
+        print(f"TTS synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
+        
         if not text:
             print("Empty text provided to synthesize method")
             return None
             
+        if not self.is_initialized():
+            print("ERROR: TTS engine not initialized in synthesize method!")
+            print(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
+            return None
+            
+        print(f"TTS engine initialized, proceeding with synthesis")
+
         # Split text into chunks if needed
         chunks = self._preprocess_text(text)
         
@@ -225,6 +300,66 @@ class TTSEngine:
                 return audio_chunks[0]
         
         return combined_audio
+        
+    async def synthesize_streaming(self, text):
+        """Convert text to speech and yield audio for each sentence as it's generated
+        
+        Args:
+            text: Text to convert to speech
+            
+        Yields:
+            bytes: Audio data chunks (WAV format), one per sentence or natural speech pause
+        """
+        print(f"TTS streaming synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
+        
+        if not text:
+            print("Empty text provided to synthesize_streaming method")
+            return
+            
+        if not self.is_initialized():
+            print("ERROR: TTS engine not initialized in synthesize_streaming method!")
+            print(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
+            return
+            
+        print(f"TTS engine initialized, proceeding with streaming synthesis")
+
+        # Split text into sentences or natural speech pauses
+        sentences = self._preprocess_text(text)
+        
+        if not sentences:
+            print("Text preprocessing returned no sentences")
+            return
+            
+        print(f"Processing {len(sentences)} sentences for streaming TTS")
+        
+        # Process each sentence individually and yield audio as soon as it's ready
+        for i, sentence in enumerate(sentences):
+            sentence = sentence.strip()
+            if not sentence:
+                print(f"Skipping empty sentence {i+1}/{len(sentences)}")
+                continue
+                
+            # Process this sentence - log with abbreviated content to avoid cluttering logs
+            max_log_chars = 50
+            log_text = sentence[:max_log_chars] + ('...' if len(sentence) > max_log_chars else '')
+            print(f"Generating audio for sentence {i+1}/{len(sentences)}: '{log_text}'")
+            
+            # Generate audio for this specific sentence
+            try:
+                # Generate audio for this sentence - async to avoid blocking
+                sentence_start = time.time()
+                audio_data = await self._generate_audio(sentence)
+                
+                if audio_data:
+                    print(f"Yielding {len(audio_data)} bytes of audio for sentence {i+1}/{len(sentences)} ({time.time() - sentence_start:.2f}s)")
+                    yield audio_data
+                else:
+                    print(f"Failed to generate audio for sentence {i+1}/{len(sentences)}")
+            except Exception as e:
+                print(f"Error generating audio for sentence {i+1}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Continue to next sentence on error
     
     def _combine_audio_chunks(self, audio_chunks):
         """Combine multiple WAV audio chunks into a single audio stream
@@ -250,66 +385,59 @@ class TTSEngine:
             
             for i, chunk in enumerate(audio_chunks):
                 try:
-                    # Read the audio data from the buffer
-                    buffer = io.BytesIO(chunk)
-                    data, rate = sf.read(buffer)
-                    
-                    # Store the first sample rate we encounter
-                    if sample_rate is None:
-                        sample_rate = rate
+                    # Use io.BytesIO to read from bytes without writing to disk
+                    with io.BytesIO(chunk) as buf:
+                        # Read data using soundfile
+                        data, sr = sf.read(buf)
                         
-                    # Ensure all chunks have the same sample rate
-                    if rate != sample_rate:
-                        print(f"Warning: Sample rate mismatch in chunk {i+1} ({rate} vs {sample_rate})")
-                        # Could resample here if needed in the future
+                        # Store first sample rate
+                        if i == 0:
+                            sample_rate = sr
+                            
+                        # Ensure consistent sample rate
+                        if sr != sample_rate:
+                            print(f"Warning: Chunk {i+1} has different sample rate ({sr} vs {sample_rate})")
+                            
+                        # Add to list
+                        wav_data.append(data)
+                        print(f"Read chunk {i+1}: {len(data)} samples at {sr}Hz")
                         
-                    wav_data.append(data)
                 except Exception as e:
-                    print(f"Error processing audio chunk {i+1}: {e}")
-                    # Skip problematic chunks but continue with the rest
-                    continue
-            
+                    print(f"Error reading chunk {i+1}: {e}")
+                    
+            # Check if we got any data
             if not wav_data:
-                print("No valid audio data found in chunks")
+                print("No chunks could be read")
                 return None
                 
-            # Concatenate all audio data
-            print(f"Concatenating {len(wav_data)} audio arrays")
+            # Concatenate audio data
+            print(f"Concatenating {len(wav_data)} audio chunks...")
             combined = np.concatenate(wav_data)
             
-            # Convert back to wav bytes
+            # Write to buffer
             buffer = io.BytesIO()
             sf.write(buffer, combined, sample_rate, format="WAV", subtype="PCM_16")
             buffer.seek(0)
             
-            result = buffer.read()
-            print(f"Successfully combined audio: {len(result)} bytes")
-            return result
+            return buffer.read()
             
         except Exception as e:
             print(f"Error combining audio chunks: {e}")
-            # In case of error, return the first chunk as fallback
-            if audio_chunks:
-                print("Error during audio combining, falling back to first chunk")
-                return audio_chunks[0]
+            import traceback
+            traceback.print_exc()
             return None
-
+            
     def get_available_voices(self) -> List[str]:
-        """Get list of available voices"""
-        # These are the most common Kokoro voices
-        voices = [
-            # American English Female
-            "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", 
-            "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-            # American English Male
-            "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", 
-            "am_michael", "am_onyx", "am_puck",
-            # British English
-            "bf_alice", "bf_emma", "bf_isabella", "bf_lily", 
-            "bm_daniel", "bm_fable", "bm_george", "bm_lewis"
+        """Get a list of available voices"""
+        # For now, we only have a few fixed voice options
+        return [
+            "af_heart",    # American female heart
+            "am_casual",   # American male casual
+            "af_casual",   # American female casual
+            "bm_casual",   # British male casual
+            "bf_casual",   # British female casual
         ]
-        return voices
-
+        
     def is_initialized(self) -> bool:
-        """Check if the TTS engine is initialized"""
+        """Check if the TTS engine is properly initialized"""
         return self.initialized and self.pipeline is not None 
