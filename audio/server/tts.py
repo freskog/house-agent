@@ -76,10 +76,14 @@ class TTSEngine:
     def _preprocess_text(self, text):
         """Preprocess text for TTS - sentence splitting, normalization etc.
         
-        This method splits text into natural speech units (sentences, phrases at commas, etc.)
-        to allow real-time streaming of audio as soon as each segment is processed.
+        This method splits text into natural speech units (sentences) based only on
+        periods, question marks, and exclamation marks. It preserves natural flow
+        and conversational tone by keeping phrases within sentences together.
         
-        Returns smaller chunks for faster initial processing, especially for long texts.
+        Note: When generating prompts for this TTS system, instruct the LLM to:
+        1. Phrase responses conversationally, as a human speaking to another human
+        2. Avoid listing items with numbers or bullet points
+        3. Use complete, flowing sentences rather than fragmented responses
         """
         try:
             # First protect common abbreviations from being split incorrectly
@@ -89,63 +93,25 @@ class TTSEngine:
             for abbr in abbreviations:
                 protected_text = protected_text.replace(abbr, abbr.replace(".", "{{DOT}}"))
             
-            # Split on sentence boundaries first (periods, exclamation marks, question marks)
+            # Split ONLY on sentence boundaries (periods, exclamation marks, question marks)
             sentence_boundaries = r'(?<=[.!?])\s+'
             sentences = re.split(sentence_boundaries, protected_text)
             
-            # Further split long sentences at natural pauses (commas, semicolons, colons, dashes)
+            # Process each sentence
             final_segments = []
-            natural_pause_boundaries = r'(?<=[,;:\-–—])\s+'
-            
-            # Use smaller chunks for faster initial output
-            # Shorter segments = faster first-chunk time
-            max_segment_length = 80  # Reduced from 120 for faster processing
             
             for sentence in sentences:
                 # Restore the protected abbreviations
                 sentence = sentence.replace("{{DOT}}", ".")
                 
-                if len(sentence) <= max_segment_length:
-                    # If sentence is a reasonable length, keep as is
-                    final_segments.append(sentence)
-                else:
-                    # For long sentences, split at natural pause points
-                    pause_segments = re.split(natural_pause_boundaries, sentence)
-                    
-                    # If split resulted in reasonable segments, use them
-                    if all(len(seg) <= max_segment_length for seg in pause_segments):
-                        final_segments.extend(pause_segments)
-                    else:
-                        # For still-too-long segments, use a fallback approach - split by length
-                        for segment in pause_segments:
-                            if len(segment) <= max_segment_length:
-                                final_segments.append(segment)
-                            else:
-                                # Use a simple chunk-by-length approach for very long text with no natural breaks
-                                chunks = []
-                                for i in range(0, len(segment), max_segment_length):
-                                    chunk = segment[i:i+max_segment_length]
-                                    # Try to avoid splitting words if possible
-                                    if i+max_segment_length < len(segment) and not segment[i+max_segment_length].isspace():
-                                        # Find the last space in this chunk
-                                        last_space = chunk.rfind(' ')
-                                        if last_space > max_segment_length * 0.5:  # Only adjust if space is reasonably positioned
-                                            chunks.append(chunk[:last_space])
-                                            # Adjust start of next chunk
-                                            i = i + last_space + 1
-                                            continue
-                                    chunks.append(chunk)
-                                final_segments.extend(chunks)
+                # Add the sentence as is without any length-based splitting
+                if sentence.strip():
+                    final_segments.append(sentence.strip())
             
-            # Filter out empty segments and trim whitespace
-            final_segments = [s.strip() for s in final_segments if s.strip()]
-            
-            # For very long texts (like reading out article content), prioritize the first few segments
+            # For very long texts, still prioritize the first few segments
             # This makes the system respond faster with the beginning of the content
             if len(final_segments) > 10:
                 # Rearrange segments to prioritize the first few
-                # Take first 3 segments, then every other segment until end
-                # This helps initial chunks get generated and sent faster
                 prioritized_segments = final_segments[:3]
                 prioritized_segments.extend(final_segments[3::2])  # Every other segment after the first 3
                 prioritized_segments.extend(final_segments[4::2])  # The remaining segments
@@ -300,7 +266,8 @@ class TTSEngine:
                 return audio_chunks[0]
         
         return combined_audio
-        
+    
+    @traceable(run_type="chain", name="TTS_Synthesize_Speech_Streaming")
     async def synthesize_streaming(self, text):
         """Convert text to speech and yield audio for each sentence as it's generated
         
