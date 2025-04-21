@@ -472,9 +472,6 @@ This is especially important when you are acting as a music player, never use ph
                     messages=new_messages
                 ).model_dump()
             
-            # Add tool_node and condition
-            tool_node = ToolNode(all_tools)
-            
             # Use trace decorator for the tools condition function
             @traceable(name="Tools Condition", run_type="chain")
             def should_continue(state):
@@ -487,6 +484,70 @@ This is especially important when you are acting as a music player, never use ph
                     
                 # If no tool calls, move to the end
                 return END
+            
+            # Define a function to check if we should route to play_response
+            @traceable(name="Play Music Condition", run_type="chain")
+            def check_play_music(state):
+                # Get the last message from the state
+                messages = state.get("messages", [])
+                if not messages:
+                    return "agent"  # Default back to agent if no messages
+                
+                # Check if the last message is a tool message
+                last_message = messages[-1]
+                if not isinstance(last_message, ToolMessage):
+                    return "agent"  # Not a tool message, go back to agent
+                
+                # Check if this is a music play tool result
+                tool_name = getattr(last_message, "name", None)
+                tool_content = getattr(last_message, "content", "")
+                
+                # Look for music play tools based on name pattern and content
+                is_music_play = tool_name == "play"
+                
+                # If this is a music play tool response, route to play_response
+                if is_music_play:
+                    return "play_response"
+                
+                # Otherwise, go back to agent
+                return "agent"
+            
+            # Create a dedicated play_response node that skips LLM invocation
+            @traceable(name="Play Response", run_type="chain")
+            def play_response(state: AgentState):
+                # Get the last message (which should be a ToolMessage)
+                last_message = state["messages"][-1] if state["messages"] else None
+                
+                # Extract song information from the tool message
+                song_info = current_music_info["current_song"]
+                # Try to get a more accurate song name from the tool message
+                if isinstance(last_message, ToolMessage) and hasattr(last_message, "content"):
+                    tool_content = last_message.content
+                    
+                    # Try to parse JSON if it looks like JSON
+                    try:
+                        if "{" in tool_content and "}" in tool_content:
+                            data = json.loads(tool_content)
+                            if isinstance(data, dict):
+                                if "track_name" in data and "artist" in data:
+                                    song_info = f"{data['artist']} - {data['track_name']}"
+                                elif "current_track" in data:
+                                    song_info = data["message"]
+                    except Exception:
+                        pass
+                    
+                
+                # Create a simple response with just the song name
+                # This follows the system requirements to only return the exact song name
+                response_message = AIMessage(content=f"{song_info}")
+                
+                # Update the current_music_info
+                current_music_info["current_song"] = song_info
+                
+                # Return the response
+                return AgentResponse(
+                    messages=[AIMessage(content=f"Now playing {song_info}")]
+                ).model_dump()
             
             # Define a function to add messages to state
             def add_messages_to_state(state, new_state):
@@ -502,11 +563,13 @@ This is especially important when you are acting as a music player, never use ph
             builder = StateGraph(AgentState)
             builder.add_node("agent", agent)
             builder.add_node("tools", tool_node)
+            builder.add_node("play_response", play_response)
             
             # Set the edge properties with custom message combiners
             builder.add_edge(START, "agent")
             builder.add_conditional_edges("agent", should_continue)
-            builder.add_edge("tools", "agent")
+            builder.add_conditional_edges("tools", check_play_music)
+            builder.add_edge("play_response", END)
             
             # Compile and yield the graph
             graph = builder.compile()
