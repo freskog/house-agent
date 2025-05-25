@@ -24,6 +24,8 @@ var/
 venv/
 ENV/
 
+.langgraph_api/
+
 # Audio samples
 speech_samples/*
 !speech_samples/.gitkeep
