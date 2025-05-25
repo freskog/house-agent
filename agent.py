@@ -20,10 +20,8 @@ import os
 import json
 from dotenv import load_dotenv
 from datetime import datetime
-import httpx
 import openai
 import uuid
-import re
 import time
 import logging
 
@@ -198,7 +196,7 @@ async def make_graph():
             print("No HA_API_KEY found - Home Assistant connection will not be available")
         
         # Add music server if needed
-        music_url = "http://localhost:8000/sse"
+        music_url = "http://10.10.100.125:8000/sse"
         music_connection: SSEConnection = {
             "transport": "sse",
             "url": music_url,
@@ -222,408 +220,350 @@ async def make_graph():
         else:
             print("Warning: No Tavily API key found - web search tool will not be available")
         
-        # Use async with to establish connection properly
-        async with client:
-            print("MCP client initialized successfully")
+        # Get tools from MCP client - these are already properly formatted LangChain tools
+        try:
+            print("Getting tools from MCP client...")
+            mcp_tools = await client.get_tools()
+            print(f"Loaded {len(mcp_tools)} tools from MCP client")
+            print("Tool types:")
+            for i, tool in enumerate(mcp_tools[:5]):  # Just log first 5 to avoid spam
+                print(f"{i+1}. {tool.name}: {type(tool).__name__}")
+        except Exception as e:
+            print(f"Error loading MCP tools: {e}")
+            mcp_tools = []
             
-            # Get tools from MCP client - these are already properly formatted LangChain tools
-            try:
-                print("Getting tools from MCP client...")
-                mcp_tools = client.get_tools()
-                print(f"Loaded {len(mcp_tools)} tools from MCP client")
-                print("Tool types:")
-                for i, tool in enumerate(mcp_tools[:5]):  # Just log first 5 to avoid spam
-                    print(f"{i+1}. {tool.name}: {type(tool).__name__}")
-            except Exception as e:
-                print(f"Error loading MCP tools: {e}")
-                mcp_tools = []
-                
-            current_music_info["mcp_tools"] = mcp_tools
-            
-            # Combine MCP tools with Tavily
-            all_tools = [*mcp_tools]
-            if tavily_tool:
-                all_tools.append(tavily_tool)
-                print(f"Added Tavily tool to the agent's tools list")
-            
-            print(f"Total tools available: {len(all_tools)}")
+        current_music_info["mcp_tools"] = mcp_tools
+        
+        # Combine MCP tools with Tavily
+        all_tools = [*mcp_tools]
+        if tavily_tool:
+            all_tools.append(tavily_tool)
+            print(f"Added Tavily tool to the agent's tools list")
+        
+        print(f"Total tools available: {len(all_tools)}")
 
-            # Try to load prompt from MCP server (simplifying the approach from previous version)
-            homeassistant_content = None
-            try:
-                # Get prompts from Home Assistant
-                print("Listing available prompts from Home Assistant...")
-                prompts = await client.sessions["home_assistant"].list_prompts()
+        # Try to load prompt from MCP server (simplifying the approach from previous version)
+        homeassistant_content = None
+        try:
+            # Get prompts from Home Assistant
+            print("Listing available prompts from Home Assistant...")
+            async with client.session("home_assistant") as session:
+                prompts = await session.list_prompts()
                 
                 # Handle different return types
                 prompts_list = prompts.prompts if hasattr(prompts, "prompts") else prompts
                 
-                print(f"Found {len(prompts_list)} prompts:")
-                for i, prompt in enumerate(prompts_list):
-                    prompt_name = prompt.name if hasattr(prompt, "name") else prompt.get("name", "Unknown")
-                    print(f"{i+1}. {prompt_name}")
-                    
-                # Try to get the first prompt
                 if prompts_list:
+                    print(f"Found {len(prompts_list)} prompts:")
+                    for i, prompt in enumerate(prompts_list):
+                        prompt_name = prompt.name if hasattr(prompt, "name") else prompt.get("name", "Unknown")
+                        print(f"{i+1}. {prompt_name}")
+                        
+                    # Try to get the first prompt
                     first_prompt = prompts_list[0]
                     prompt_name = first_prompt.name if hasattr(first_prompt, "name") else first_prompt.get("name", "Unknown")
                     print(f"Getting content for prompt '{prompt_name}'...")
-                    
                     try:
-                        prompt_messages = await client.get_prompt("home_assistant", prompt_name, {})
-                        print(f"Prompt response type: {type(prompt_messages).__name__}")
-                        
-                        # Add more detailed debug info
-                        if prompt_messages:
-                            print(f"Got {len(prompt_messages)} prompt messages")
-                            print(f"First message type: {type(prompt_messages[0]).__name__}")
-                            
-                            # Examine the messages to extract system content
-                            for i, msg in enumerate(prompt_messages):
-                                print(f"Message {i} attributes: {dir(msg)[:10]}...")
-                                
-                                # Try multiple approaches to extract system content
-                                # 1. Check for role attribute
-                                if hasattr(msg, 'role') and msg.role == 'system' and hasattr(msg, 'content'):
-                                    homeassistant_content = msg.content
-                                    print(f"Found system message via role attribute")
-                                    break
-                                # 2. Check for type attribute
-                                elif hasattr(msg, 'type') and msg.type == 'system' and hasattr(msg, 'content'):
-                                    homeassistant_content = msg.content
-                                    print(f"Found system message via type attribute")
-                                    break
-                                # 3. Check dictionary-style access
-                                elif isinstance(msg, dict) and msg.get('role') == 'system' and 'content' in msg:
-                                    homeassistant_content = msg['content']
-                                    print(f"Found system message via dictionary access")
-                                    break
-                                # 4. First message fallback if it has content
-                                elif i == 0 and hasattr(msg, 'content') and getattr(msg, 'content', None):
-                                    # Only use first message content if it's substantial
-                                    content = msg.content
-                                    if len(content) > 50:  # Arbitrary threshold to ensure it's not just a greeting
-                                        homeassistant_content = content
-                                        print(f"Using first message content as fallback")
-                                        break
-                        
+                        prompt_details = await session.get_prompt(prompt_name)
+                        if hasattr(prompt_details, "content"):
+                            homeassistant_content = prompt_details.content
+                        elif isinstance(prompt_details, dict):
+                            homeassistant_content = prompt_details.get("content")
                         if homeassistant_content:
-                            print(f"Successfully loaded system message from '{prompt_name}' prompt")
-                            # Print a sample of the content
-                            content_preview = homeassistant_content[:100] + "..." if len(homeassistant_content) > 100 else homeassistant_content
-                            print(f"Content preview: {content_preview}")
+                            print(f"Successfully loaded prompt content ({len(homeassistant_content)} chars)")
                         else:
-                            print(f"Could not find system message in prompt response")
-                            # Try to dump a full representation of the first message to help debug
-                            try:
-                                if prompt_messages and len(prompt_messages) > 0:
-                                    msg = prompt_messages[0]
-                                    if hasattr(msg, '__dict__'):
-                                        print(f"First message content: {msg.__dict__}")
-                                    elif isinstance(msg, dict):
-                                        print(f"First message content: {msg}")
-                            except Exception as dump_error:
-                                print(f"Could not dump message content: {dump_error}")
+                            print("No content found in prompt details")
                     except Exception as e:
                         print(f"Failed to get prompt details: {e}")
-            except Exception as e:
-                print(f"Failed to list prompts: {e}")
-            
-            # Try to get the current playing song
-            current_song = "Nothing playing"
-            try:
-                current_song = await get_current_song(client, mcp_tools)
+                else:
+                    print("No prompts found")
+        except Exception as e:
+            print(f"Failed to list prompts: {e}")
+        
+        # Try to get the current playing song
+        current_song = "Nothing playing"
+        try:
+            async with client.session("music") as session:
+                current_song = await get_current_song(session, mcp_tools)
                 print(f"Current song: {current_song}")
-            except Exception as e:
-                print(f"Couldn't get current song, using default: {e}")
-                
-            current_music_info["current_song"] = current_song
+        except Exception as e:
+            print(f"Couldn't get current song, using default: {e}")
+            
+        current_music_info["current_song"] = current_song
 
-            # Create enhanced system message with date and custom instructions
-            current_date = datetime.now().strftime("%B %d, %Y")
-            enhanced_system_message = f"""You are an intelligent assistant that can control smart home devices, play music, and search the web for information.
-Current date: {current_date}
+        # Create enhanced system message with date and custom instructions
+        current_date = datetime.now().strftime("%B %d, %Y")
+        enhanced_system_message = f"""You are a helpful AI assistant for a smart home. Today is {current_date}.
+
 Currently playing: {current_song}
 
- See the next section for which entities and areas you can use when interacting with home assistant. 
- I've included a prompt that the home assistant tool generated. Evaluate which of your commands
- can be used for what entities. Always provide the domain, for any home assistant command, or
- use the entity_id which includes the domain.
+{homeassistant_content if homeassistant_content else ''}
 
- Example:
-   Set temperature to 17 degrees in the kitchen
-   -> HassClimateSetTemperature(17, area=Kitchen, domain=climate)
-   -> HassTurnOn(area="downstairs office", domain=light)
-   -> HassTurnOff(entity_id="light.hallway")
+You have access to various tools to help control the home and get information. Use these tools when appropriate to help the user.
 
- NOTE:
- The user will provide multiple aliases for some entity names and areas make sure you only use the first one.
- The aliases are separated by ',' only use the first alias in any command.
+When the user asks about music:
+1. Use the music tools to control playback
+2. Only return the exact song name when asked what's playing
+3. Don't add any extra text when returning the song name
 
- Think hard before calling a function, make sure you are using the right function
- for the right purpose. The user needs to always specify at least what the domain of the action is.
+For all other requests:
+1. Be helpful and concise
+2. Use tools when needed
+3. Don't make assumptions about what the user wants
+4. Ask for clarification if needed"""
 
-Important:
- - If you are targeting a single entity always specify the name of the entity and the domain
- - If you are targeting multiple entities never specify entity names, instead specify the domain and area
- - You can call multiple commands at once, but prefer to use one single command for an area over multiple commands with one entity.
+        # Cache the system message
+        cached_system_message = enhanced_system_message
+        print(f"System message created and cached ({len(enhanced_system_message)} chars)")
 
-Home assistant prompt:
-"{homeassistant_content}"
+        # Create the model with tool-calling enabled
+        # Use ChatOpenAI directly with LangSmith tracing - it will automatically be traced
+        llm = ChatOpenAI(
+            streaming=True,
+            temperature=0,
+            model="gpt-4o-mini",
+            cache=True  # Enable response caching
+        )
+        
+        # Log available tools for debugging
+        tool_names = {tool.name for tool in all_tools if hasattr(tool, 'name')}
+        print(f"Available tool names: {tool_names}")
+                
+        # Bind the tools to the LLM directly - no need for custom schema conversion
+        llm = llm.bind_tools(all_tools)
+        
+        # Use standard ToolNode without any mapping - the MCP server provides tools with the correct naming already
+        tool_node = ToolNode(all_tools)
+        
+        # Create the agent function that processes messages and returns a new message
+        @traceable(name="Agent", run_type="chain")
+        def agent(state: AgentState):
+            # Process messages to ensure all ToolMessages have required fields
+            processed_messages = []
+            for msg in state["messages"]:
+                processed_messages.append(ensure_valid_tool_message(msg))
+            
+            messages = processed_messages
+            
+            # Add system message if it's the first interaction
+            if len(messages) == 1 and isinstance(messages[0], HumanMessage):
+                # Get the latest music info for the system message
+                latest_song = current_music_info["current_song"]
+                
+                # Create updated system message with current song and date
+                current_date = datetime.now().strftime("%B %d, %Y")
+                updated_system_message = cached_system_message.replace(
+                    f"Currently playing: {current_song}",
+                    f"Currently playing: {latest_song}"
+                )
+                
+                messages = [
+                    SystemMessage(content=updated_system_message),
+                    *messages
+                ]
 
+            # Always create a new thread_id for now
+            # This will be overridden by the config if provided when the graph is invoked
+            thread_id = str(uuid.uuid4())
+            
+            # Normal processing with thread_id
+            # This will be passed through to LangSmith for tracing
+            response = llm.invoke(messages, config={"thread_id": thread_id})
+            
+            # For tool messages, ensure they have required fields
+            if isinstance(response, ToolMessage) and not hasattr(response, "tool_call_id"):
+                response.tool_call_id = str(uuid.uuid4())
+            
+            # Create a new state with updated messages
+            new_messages = []
+            if isinstance(response, AIMessage):
+                new_messages.append(response)
+            else:
+                # Convert to AIMessage if it's not already
+                if hasattr(response, 'content'):
+                    new_messages.append(AIMessage(content=response.content))
+                else:
+                    new_messages.append(AIMessage(content=str(response)))
+            
+            # Return structured response
+            return AgentResponse(
+                messages=new_messages
+            ).model_dump()
+        
+        # Use trace decorator for the tools condition function
+        @traceable(name="Tools Condition", run_type="chain")
+        def should_continue(state):
+            # Get the last message
+            last_message = state["messages"][-1] if state["messages"] else None
+            
+            # Check if there are tool calls in the last message
+            if last_message and isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tools"
+                
+            # If no tool calls, move to the end
+            return "end"
+        
+        # Define a function to check if we should route to play_response
+        @traceable(name="Play Music Condition", run_type="chain")
+        def check_play_music(state):
+            # Get the last message from the state
+            messages = state.get("messages", [])
+            if not messages:
+                return "agent"  # Default back to agent if no messages
+            
+            # Check if the last message is a tool message
+            last_message = messages[-1]
+            if not isinstance(last_message, ToolMessage):
+                return "agent"  # Not a tool message, go back to agent
+            
+            # Check if this is a music play tool result
+            tool_name = getattr(last_message, "name", None)
+            tool_content = getattr(last_message, "content", "")
+            
+            # Look for music play tools based on name pattern and content
+            is_music_play = tool_name == "play"
+            
+            # If this is a music play tool response, route to play_response
+            if is_music_play:
+                return "play_response"
+            
+            # Otherwise, go back to agent
+            return "agent"
+        
+        # Create a dedicated play_response node that skips LLM invocation
+        @traceable(name="Play Response", run_type="chain")
+        def play_response(state: AgentState):
+            # Get the last message (which should be a ToolMessage)
+            last_message = state["messages"][-1] if state["messages"] else None
+            
+            # Extract song information from the tool message
+            song_info = current_music_info["current_song"]
+            # Try to get a more accurate song name from the tool message
+            if isinstance(last_message, ToolMessage) and hasattr(last_message, "content"):
+                tool_content = last_message.content
+                
+                # Try to parse JSON if it looks like JSON
+                try:
+                    if "{" in tool_content and "}" in tool_content:
+                        data = json.loads(tool_content)
+                        if isinstance(data, dict):
+                            if "track_name" in data and "artist" in data:
+                                song_info = f"{data['artist']} - {data['track_name']}"
+                            elif "current_track" in data:
+                                song_info = data["message"]
+                except Exception:
+                    pass
+                
+            
+            # Create a simple response with just the song name
+            # This follows the system requirements to only return the exact song name
+            response_message = AIMessage(content=f"{song_info}")
+            
+            # Update the current_music_info
+            current_music_info["current_song"] = song_info
+            
+            # Return the response
+            return AgentResponse(
+                messages=[AIMessage(content=f"Now playing {song_info}")]
+            ).model_dump()
+        
+        # Define a function to add messages to state
+        def add_messages_to_state(state, new_state):
+            """Add messages from new_state to the current state."""
+            if not new_state or "messages" not in new_state or not new_state["messages"]:
+                return state
+            
+            return {
+                "messages": state["messages"] + new_state["messages"],
+            }
+        
+        # Build the graph with proper node setup
+        builder = StateGraph(AgentState)
+        
+        # Add nodes
+        builder.add_node("agent", agent)
+        builder.add_node("tools", tool_node)
+        builder.add_node("play_response", play_response)
+        
+        # Set the edge properties
+        builder.add_edge(START, "agent")
+        
+        # Add conditional edges
+        builder.add_conditional_edges(
+            "agent",
+            should_continue,
+            {
+                "tools": "tools",
+                "end": END
+            }
+        )
+        
+        # Add conditional edges from tools node
+        builder.add_conditional_edges(
+            "tools",
+            check_play_music,
+            {
+                "play_response": "play_response",
+                "agent": "agent"
+            }
+        )
+        
+        # Add edge from play_response to end
+        builder.add_edge("play_response", END)
+        
+        # Compile and yield the graph
+        graph = builder.compile()
 
-Additional Instructions:
-1. Always be aware of the current date ({current_date}) when answering questions about time or dates
-2. For general knowledge questions or current information, use the tavily_search_results tool
-3. Be extremely concise in your responses - keep them to a single short sentence whenever possible
-4. SYSTEM REQUIREMENT: When playing music, your response MUST contain ONLY the exact song name - nothing else. Example:
-   - User: "Play Dixie Chicken"
-   - INCORRECT response: "Now playing: Dixie Chicken by Little Feat. Enjoy the music! Next up: Midnight Rider by The Allman Brothers Band, Fat Man in the Bathtub by Little Feat, Black Water by The Doobie Brothers"
-   - CORRECT response: "Now playing Dixing Chicken by Little"
-5. When using tools, explain what you're doing in just a few words before using them
-6. After using a tool, ALWAYS answer the user's original question with the information you found - don't just say what the tool returned
-7. For smart home controls, execute the action without asking for confirmation unless it's something risky
-8. You know that "{current_song}" is currently playing (if anything)
-9. IMPORTANT: Since your responses will be read aloud via text-to-speech, avoid using any formatting or special characters
-10. For search tools: When a search fails to find relevant information, state what you searched for, briefly summarize what was found (or not found), and ask if the user wants to refine the search instead of automatically trying again.
-11. NEVER respond with phrases like "I found that...", "... Enjoy the music!", or "According to the tool..." - just give the information directly
+        # Check if we have a Home Assistant turn_on tool and print its details
+        turn_on_tool = next((tool for tool in all_tools if "turn_on" in getattr(tool, "name", "")), None)
+        if turn_on_tool:
+            print(f"Turn on tool name: {turn_on_tool.name}")
+            if hasattr(turn_on_tool, "args_schema"):
+                # Try to print schema details safely
+                try:
+                    schema_info = {}
+                    if hasattr(turn_on_tool.args_schema, "schema"):
+                        schema_info = turn_on_tool.args_schema.schema()
+                    elif isinstance(turn_on_tool.args_schema, dict):
+                        schema_info = turn_on_tool.args_schema
+                    else:
+                        schema_info = {"type": str(type(turn_on_tool.args_schema))}
+                    print(f"Turn on tool schema: {json.dumps(schema_info, indent=2)}")
+                except Exception as e:
+                    print(f"Could not print schema details: {e}")
+                    print(f"Schema type: {type(turn_on_tool.args_schema).__name__}")
 
-IMPORTANT: 
-
-Remember that as a voice assistant, your responses should be much shorter than you'd normally provide in written form.
-This is especially important when you are acting as a music player, never use phrases like "Enjoy the music!" or similar non-informative phrases.
-
-[Prompt version: v2 - Updated: {current_date}]"""
-
-            # Store the enhanced system message globally for reuse
-            cached_system_message = enhanced_system_message
-
-            # Create the model with tool-calling enabled
-            # Use ChatOpenAI directly with LangSmith tracing - it will automatically be traced
-            llm = ChatOpenAI(
-                streaming=True,
+        # Perform a warm-up call to eagerly load the system message into cache
+        print("Performing warm-up call to load system prompt into cache...")
+        warmup_start_time = time.time()
+        try:
+            # Create a simple test message
+            warmup_messages = [
+                SystemMessage(content=cached_system_message),
+                HumanMessage(content="hello")
+            ]
+            
+            # Make a non-streaming call to ensure it's fully loaded and cached
+            # Create a non-streaming version for the warmup
+            warmup_llm = ChatOpenAI(
+                streaming=False,
                 temperature=0,
                 model="gpt-4o-mini",
-                cache=True  # Enable response caching
-            )
+                cache=True
+            ).bind_tools(all_tools)
             
-            # Log available tools for debugging
-            tool_names = {tool.name for tool in all_tools if hasattr(tool, 'name')}
-            print(f"Available tool names: {tool_names}")
-                    
-            # Bind the tools to the LLM directly - no need for custom schema conversion
-            llm = llm.bind_tools(all_tools)
+            # Issue a warmup call
+            _ = warmup_llm.invoke(warmup_messages)
+            warmup_elapsed = time.time() - warmup_start_time
+            print(f"Warm-up call completed successfully in {warmup_elapsed:.2f} seconds - system prompt loaded into cache")
+        except Exception as e:
+            print(f"Warm-up call failed, but we'll continue anyway: {e}")
             
-            # Use standard ToolNode without any mapping - the MCP server provides tools with the correct naming already
-            tool_node = ToolNode(all_tools)
-            
-            # Create the agent function that processes messages and returns a new message
-            @traceable(name="Agent", run_type="chain")
-            def agent(state: AgentState):
-                # Process messages to ensure all ToolMessages have required fields
-                processed_messages = []
-                for msg in state["messages"]:
-                    processed_messages.append(ensure_valid_tool_message(msg))
-                
-                messages = processed_messages
-                
-                # Add system message if it's the first interaction
-                if len(messages) == 1 and isinstance(messages[0], HumanMessage):
-                    # Get the latest music info for the system message
-                    latest_song = current_music_info["current_song"]
-                    
-                    # Create updated system message with current song and date
-                    current_date = datetime.now().strftime("%B %d, %Y")
-                    updated_system_message = cached_system_message.replace(
-                        f"Currently playing: {current_song}",
-                        f"Currently playing: {latest_song}"
-                    )
-                    
-                    messages = [
-                        SystemMessage(content=updated_system_message),
-                        *messages
-                    ]
+        total_init_time = time.time() - start_time
+        print(f"Agent graph initialization completed in {total_init_time:.2f} seconds")
 
-                # Always create a new thread_id for now
-                # This will be overridden by the config if provided when the graph is invoked
-                thread_id = str(uuid.uuid4())
-                
-                # Normal processing with thread_id
-                # This will be passed through to LangSmith for tracing
-                response = llm.invoke(messages, config={"thread_id": thread_id})
-                
-                # For tool messages, ensure they have required fields
-                if isinstance(response, ToolMessage) and not hasattr(response, "tool_call_id"):
-                    response.tool_call_id = str(uuid.uuid4())
-                
-                # Create a new state with updated messages
-                new_messages = []
-                if isinstance(response, AIMessage):
-                    new_messages.append(response)
-                else:
-                    # Convert to AIMessage if it's not already
-                    if hasattr(response, 'content'):
-                        new_messages.append(AIMessage(content=response.content))
-                    else:
-                        new_messages.append(AIMessage(content=str(response)))
-                
-                # Return structured response
-                return AgentResponse(
-                    messages=new_messages
-                ).model_dump()
-            
-            # Use trace decorator for the tools condition function
-            @traceable(name="Tools Condition", run_type="chain")
-            def should_continue(state):
-                # Get the last message
-                last_message = state["messages"][-1] if state["messages"] else None
-                
-                # Check if there are tool calls in the last message
-                if last_message and isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                    return "tools"
-                    
-                # If no tool calls, move to the end
-                return END
-            
-            # Define a function to check if we should route to play_response
-            @traceable(name="Play Music Condition", run_type="chain")
-            def check_play_music(state):
-                # Get the last message from the state
-                messages = state.get("messages", [])
-                if not messages:
-                    return "agent"  # Default back to agent if no messages
-                
-                # Check if the last message is a tool message
-                last_message = messages[-1]
-                if not isinstance(last_message, ToolMessage):
-                    return "agent"  # Not a tool message, go back to agent
-                
-                # Check if this is a music play tool result
-                tool_name = getattr(last_message, "name", None)
-                tool_content = getattr(last_message, "content", "")
-                
-                # Look for music play tools based on name pattern and content
-                is_music_play = tool_name == "play"
-                
-                # If this is a music play tool response, route to play_response
-                if is_music_play:
-                    return "play_response"
-                
-                # Otherwise, go back to agent
-                return "agent"
-            
-            # Create a dedicated play_response node that skips LLM invocation
-            @traceable(name="Play Response", run_type="chain")
-            def play_response(state: AgentState):
-                # Get the last message (which should be a ToolMessage)
-                last_message = state["messages"][-1] if state["messages"] else None
-                
-                # Extract song information from the tool message
-                song_info = current_music_info["current_song"]
-                # Try to get a more accurate song name from the tool message
-                if isinstance(last_message, ToolMessage) and hasattr(last_message, "content"):
-                    tool_content = last_message.content
-                    
-                    # Try to parse JSON if it looks like JSON
-                    try:
-                        if "{" in tool_content and "}" in tool_content:
-                            data = json.loads(tool_content)
-                            if isinstance(data, dict):
-                                if "track_name" in data and "artist" in data:
-                                    song_info = f"{data['artist']} - {data['track_name']}"
-                                elif "current_track" in data:
-                                    song_info = data["message"]
-                    except Exception:
-                        pass
-                    
-                
-                # Create a simple response with just the song name
-                # This follows the system requirements to only return the exact song name
-                response_message = AIMessage(content=f"{song_info}")
-                
-                # Update the current_music_info
-                current_music_info["current_song"] = song_info
-                
-                # Return the response
-                return AgentResponse(
-                    messages=[AIMessage(content=f"Now playing {song_info}")]
-                ).model_dump()
-            
-            # Define a function to add messages to state
-            def add_messages_to_state(state, new_state):
-                """Add messages from new_state to the current state."""
-                if not new_state or "messages" not in new_state or not new_state["messages"]:
-                    return state
-                
-                return {
-                    "messages": state["messages"] + new_state["messages"],
-                }
-            
-            # Build the graph with proper node setup
-            builder = StateGraph(AgentState)
-            builder.add_node("agent", agent)
-            builder.add_node("tools", tool_node)
-            builder.add_node("play_response", play_response)
-            
-            # Set the edge properties with custom message combiners
-            builder.add_edge(START, "agent")
-            builder.add_conditional_edges("agent", should_continue)
-            builder.add_conditional_edges("tools", check_play_music)
-            builder.add_edge("play_response", END)
-            
-            # Compile and yield the graph
-            graph = builder.compile()
-
-            # Check if we have a Home Assistant turn_on tool and print its details
-            turn_on_tool = next((tool for tool in all_tools if "turn_on" in getattr(tool, "name", "")), None)
-            if turn_on_tool:
-                print(f"Turn on tool name: {turn_on_tool.name}")
-                if hasattr(turn_on_tool, "args_schema"):
-                    # Try to print schema details safely
-                    try:
-                        schema_info = {}
-                        if hasattr(turn_on_tool.args_schema, "schema"):
-                            schema_info = turn_on_tool.args_schema.schema()
-                        elif isinstance(turn_on_tool.args_schema, dict):
-                            schema_info = turn_on_tool.args_schema
-                        else:
-                            schema_info = {"type": str(type(turn_on_tool.args_schema))}
-                        print(f"Turn on tool schema: {json.dumps(schema_info, indent=2)}")
-                    except Exception as e:
-                        print(f"Could not print schema details: {e}")
-                        print(f"Schema type: {type(turn_on_tool.args_schema).__name__}")
-
-            # Perform a warm-up call to eagerly load the system message into cache
-            print("Performing warm-up call to load system prompt into cache...")
-            warmup_start_time = time.time()
-            try:
-                # Create a simple test message
-                warmup_messages = [
-                    SystemMessage(content=cached_system_message),
-                    HumanMessage(content="hello")
-                ]
-                
-                # Make a non-streaming call to ensure it's fully loaded and cached
-                # Create a non-streaming version for the warmup
-                warmup_llm = ChatOpenAI(
-                    streaming=False,
-                    temperature=0,
-                    model="gpt-4o-mini",
-                    cache=True
-                ).bind_tools(all_tools)
-                
-                # Issue a warmup call
-                _ = warmup_llm.invoke(warmup_messages)
-                warmup_elapsed = time.time() - warmup_start_time
-                print(f"Warm-up call completed successfully in {warmup_elapsed:.2f} seconds - system prompt loaded into cache")
-            except Exception as e:
-                print(f"Warm-up call failed, but we'll continue anyway: {e}")
-                
-            total_init_time = time.time() - start_time
-            print(f"Agent graph initialization completed in {total_init_time:.2f} seconds")
-
-            # Yield the graph
-            yield graph
+        # Yield the graph
+        yield graph
     except Exception as e:
         print(f"Error during agent initialization: {e}")
         import traceback
