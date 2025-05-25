@@ -40,3 +40,6 @@ websockets>=12.0.0
 # TTS components
 kokoro>=0.7.4
 soundfile>=0.13.1
+langchain-mcp-adapters==0.1.1
+langchain-community==0.3.24
+langchain-openai==0.3.18
