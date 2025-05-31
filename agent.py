@@ -17,6 +17,7 @@ from langchain_community.tools import TavilySearchResults
 
 # Import Spotify integration
 from spotify import SpotifyClient, create_spotify_tools
+from spotify.tools import current_music_state
 
 import asyncio
 import os
@@ -254,7 +255,7 @@ You have access to various tools to help control the home and get information. U
 Music Control (Spotify Web API):
 - Use get_current_song to check what's currently playing
 - Use play_music to search and play tracks, albums, or artists
-- Use pause_music, next_track, previous_track for playback control
+- Use pause_music, stop_music, next_track, previous_track for playback control
 - Use set_volume to adjust volume (0-100)
 - Use search_music to find specific tracks and get their URIs
 - Use get_spotify_devices to see available playback devices
@@ -263,7 +264,8 @@ When the user asks about music:
 1. Use the appropriate Spotify tools for control
 2. For "what's playing" queries, use get_current_song and return just the track info
 3. For play requests, search if needed, then play the track
-4. Provide helpful feedback about what actions were taken
+4. For stop/pause requests, use stop_music or pause_music
+5. Provide helpful feedback about what actions were taken
 
 For all other requests:
 1. Be helpful and concise
@@ -306,8 +308,8 @@ For all other requests:
             
             # Add system message if it's the first interaction
             if len(messages) == 1 and isinstance(messages[0], HumanMessage):
-                # Get the latest music info for the system message
-                latest_song = current_music_info["current_song"]
+                # Get the latest music info from the Spotify tools state
+                latest_song = current_music_state.get("current_song", "Nothing playing")
                 
                 # Create updated system message with current song and date
                 current_date = datetime.now().strftime("%B %d, %Y")
@@ -394,7 +396,7 @@ For all other requests:
                                     break
                     
                     # Check if it was a music control command
-                    if tool_name in ["play_music", "pause_music", "next_track", "previous_track", "set_volume"]:
+                    if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume"]:
                         # Check if the command succeeded (empty content or no error message)
                         content = getattr(message, 'content', '')
                         if not content or not any(error_word in content.lower() for error_word in ["failed", "error", "no tracks found"]):

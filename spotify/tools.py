@@ -12,6 +12,28 @@ from .client import SpotifyClient
 
 logger = logging.getLogger(__name__)
 
+# Global variable to track current music state across all tool calls
+# This will be imported and used by the agent
+current_music_state = {
+    "current_song": "Nothing playing",
+    "last_updated": None
+}
+
+def update_music_state(new_state: str):
+    """Update the global music state."""
+    global current_music_state
+    import datetime
+    current_music_state["current_song"] = new_state
+    current_music_state["last_updated"] = datetime.datetime.now()
+    
+    # Also update the agent's current_music_info if it exists
+    try:
+        import agent
+        if hasattr(agent, 'current_music_info'):
+            agent.current_music_info["current_song"] = new_state
+    except ImportError:
+        pass  # Agent module not available
+
 class PlayMusicInput(BaseModel):
     """Input schema for playing music."""
     query: Optional[str] = Field(None, description="Search query for music to play (song, artist, album)")
@@ -42,8 +64,16 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Get information about the currently playing song."""
         try:
             current = spotify_client.get_current_playback()
-            if not current or not current.get('item'):
-                return "No music is currently playing"
+            if not current:
+                result = "No music is currently playing"
+                update_music_state(result)
+                return result
+            
+            # Check if there's a track loaded (even if paused)
+            if not current.get('item'):
+                result = "No music is currently playing"
+                update_music_state(result)
+                return result
                 
             track = current['item']
             artist = ', '.join([a['name'] for a in track['artists']])
@@ -51,11 +81,15 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             album = track['album']['name']
             is_playing = current.get('is_playing', False)
             
-            return f"Currently {'playing' if is_playing else 'paused'}: '{song}' by {artist} from '{album}'"
+            result = f"Currently {'playing' if is_playing else 'paused'}: '{song}' by {artist} from '{album}'"
+            update_music_state(result)
+            return result
             
         except Exception as e:
             logger.error(f"Error getting current song: {e}")
-            return f"Error getting current song: {str(e)}"
+            result = f"Error getting current song: {str(e)}"
+            update_music_state("No music is currently playing")
+            return result
             
     def play_music(query: Optional[str] = None, uri: Optional[str] = None) -> str:
         """Play music by search query or specific URI."""
@@ -63,7 +97,13 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             if uri:
                 # Play specific URI
                 success = spotify_client.play(uri=uri)
-                return "Music started playing" if success else "Failed to start music playback"
+                if success:
+                    # Update state to reflect music is now playing
+                    # We could call get_current_song here, but let's just indicate something is playing
+                    update_music_state("Music is playing")
+                    return "Music started playing"
+                else:
+                    return "Failed to start music playback"
                 
             elif query:
                 # Search for music and play first result
@@ -80,13 +120,19 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
                 
                 success = spotify_client.play(uri=track_uri)
                 if success:
+                    state = f"Currently playing: '{song}' by {artist}"
+                    update_music_state(state)
                     return f"Now playing: '{song}' by {artist}"
                 else:
                     return "Failed to start music playback"
             else:
                 # Resume playback
                 success = spotify_client.play()
-                return "Music resumed" if success else "Failed to resume music playback"
+                if success:
+                    update_music_state("Music resumed")
+                    return "Music resumed"
+                else:
+                    return "Failed to resume music playback"
                 
         except Exception as e:
             logger.error(f"Error playing music: {e}")
@@ -96,10 +142,35 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Pause the currently playing music."""
         try:
             success = spotify_client.pause()
-            return "Music paused" if success else "Failed to pause music"
+            if success:
+                update_music_state("Music paused")
+                return "Music paused"
+            else:
+                return "Failed to pause music"
         except Exception as e:
             logger.error(f"Error pausing music: {e}")
             return f"Error pausing music: {str(e)}"
+            
+    def stop_music(*args, **kwargs) -> str:
+        """Stop the currently playing music."""
+        try:
+            # Check if there's music to stop
+            current = spotify_client.get_current_playback()
+            if not current or not current.get('item'):
+                result = "No music is currently playing"
+                update_music_state(result)
+                return result
+            
+            # Use pause to stop the music
+            success = spotify_client.pause()
+            if success:
+                update_music_state("Music stopped")
+                return "Music stopped"
+            else:
+                return "Failed to stop music"
+        except Exception as e:
+            logger.error(f"Error stopping music: {e}")
+            return f"Error stopping music: {str(e)}"
             
     def next_track(*args, **kwargs) -> str:
         """Skip to the next track."""
@@ -193,6 +264,12 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             name="pause_music",
             description="Pause the currently playing music",
             func=pause_music,
+            return_direct=False
+        ),
+        Tool(
+            name="stop_music",
+            description="Stop the currently playing music",
+            func=stop_music,
             return_direct=False
         ),
         Tool(
