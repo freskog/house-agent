@@ -47,3 +47,7 @@ speech_samples/*
 
 # Model files
 *.bin
+
+.spotify*/
+
+.langgraph_api/*

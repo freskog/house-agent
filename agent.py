@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient, SSEConnection
 from langchain_community.tools import TavilySearchResults
 
+# Import Spotify integration
+from spotify import SpotifyClient, create_spotify_tools
+
 import asyncio
 import os
 import json
@@ -108,53 +111,6 @@ def pretty_print(obj: Any, indent: int = 2) -> None:
     except Exception:
         print(f"<Non-serializable object of type {type(obj).__name__}>")
 
-# Helper function to get current music status
-async def get_current_song(client_session, music_tools):
-    current_song = "Nothing playing"
-    try:
-        # Get music status
-        music_status_tool = next((tool for tool in music_tools if tool.name == "music_get_status" or tool.name == "get_status"), None)
-        if music_status_tool:
-            logger.debug(f"Using music status tool: {music_status_tool.name}")
-            try:
-                # Use arun() for StructuredTools
-                status_result = await music_status_tool.arun({})
-                logger.debug(f"Music status raw result: {status_result}")
-            except Exception as e:
-                logger.debug(f"arun() failed, trying direct tool call: {e}")
-                # Try direct call through MCP session as fallback
-                try:
-                    # Use direct call through the provided client session
-                    if client_session and hasattr(client_session, "sessions") and "music" in client_session.sessions:
-                        status_result = await client_session.sessions["music"].call_tool(music_status_tool.name, {})
-                    else:
-                        logger.error("No music session available in client")
-                        return current_song
-                except Exception as direct_e:
-                    logger.error(f"Direct tool call also failed: {direct_e}")
-                    return current_song
-                
-            if isinstance(status_result, dict):
-                if "current_track" in status_result and status_result.get("status") == "playing":
-                    current_song = status_result["current_track"]
-                elif "title" in status_result and "artist" in status_result and status_result.get("status") == "playing":
-                    current_song = f"{status_result['artist']} - {status_result['title']}"
-            elif isinstance(status_result, str):
-                # Try to parse string result as JSON
-                try:
-                    status_data = json.loads(status_result)
-                    if isinstance(status_data, dict):
-                        if "current_track" in status_data and status_data.get("status") == "playing":
-                            current_song = status_data["current_track"]
-                        elif "title" in status_data and "artist" in status_data and status_data.get("status") == "playing":
-                            current_song = f"{status_data['artist']} - {status_data['title']}"
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.error(f"Couldn't get current song: {e}")
-    
-    return current_song
-
 # Utility function to ensure tool messages have required fields
 def ensure_valid_tool_message(message):
     if isinstance(message, ToolMessage) and not hasattr(message, "tool_call_id"):
@@ -195,18 +151,6 @@ async def make_graph():
         else:
             print("No HA_API_KEY found - Home Assistant connection will not be available")
         
-        # Add music server if needed
-        music_url = "http://10.10.100.125:8000/sse"
-        music_connection: SSEConnection = {
-            "transport": "sse",
-            "url": music_url,
-            "timeout": 10,
-            "sse_read_timeout": 60,
-            "session_kwargs": {}
-        }
-        connections["music"] = music_connection
-        print("Added music connection to MCP client")
-        
         # Initialize client with connections
         print(f"Initializing MCP client with {len(connections)} connections")
         client = MultiServerMCPClient(connections=connections)
@@ -219,6 +163,16 @@ async def make_graph():
             print("Tavily search tool created")
         else:
             print("Warning: No Tavily API key found - web search tool will not be available")
+        
+        # Create Spotify client and tools
+        spotify_tools = []
+        try:
+            spotify_client = SpotifyClient()
+            spotify_tools = create_spotify_tools(spotify_client)
+            print(f"Created {len(spotify_tools)} Spotify tools")
+        except Exception as e:
+            print(f"Warning: Could not initialize Spotify tools: {e}")
+            print("Spotify functionality will not be available")
         
         # Get tools from MCP client - these are already properly formatted LangChain tools
         try:
@@ -234,13 +188,16 @@ async def make_graph():
             
         current_music_info["mcp_tools"] = mcp_tools
         
-        # Combine MCP tools with Tavily
-        all_tools = [*mcp_tools]
+        # Combine all tools: MCP tools + Spotify tools + Tavily
+        all_tools = [*mcp_tools, *spotify_tools]
         if tavily_tool:
             all_tools.append(tavily_tool)
             print(f"Added Tavily tool to the agent's tools list")
         
         print(f"Total tools available: {len(all_tools)}")
+        if spotify_tools:
+            spotify_tool_names = [tool.name for tool in spotify_tools]
+            print(f"Spotify tools: {spotify_tool_names}")
 
         # Try to load prompt from MCP server (simplifying the approach from previous version)
         homeassistant_content = None
@@ -280,15 +237,8 @@ async def make_graph():
         except Exception as e:
             print(f"Failed to list prompts: {e}")
         
-        # Try to get the current playing song
+        # Initialize current song as placeholder (will be replaced by Spotify integration)
         current_song = "Nothing playing"
-        try:
-            async with client.session("music") as session:
-                current_song = await get_current_song(session, mcp_tools)
-                print(f"Current song: {current_song}")
-        except Exception as e:
-            print(f"Couldn't get current song, using default: {e}")
-            
         current_music_info["current_song"] = current_song
 
         # Create enhanced system message with date and custom instructions
@@ -301,10 +251,19 @@ Currently playing: {current_song}
 
 You have access to various tools to help control the home and get information. Use these tools when appropriate to help the user.
 
+Music Control (Spotify Web API):
+- Use get_current_song to check what's currently playing
+- Use play_music to search and play tracks, albums, or artists
+- Use pause_music, next_track, previous_track for playback control
+- Use set_volume to adjust volume (0-100)
+- Use search_music to find specific tracks and get their URIs
+- Use get_spotify_devices to see available playback devices
+
 When the user asks about music:
-1. Use the music tools to control playback
-2. Only return the exact song name when asked what's playing
-3. Don't add any extra text when returning the song name
+1. Use the appropriate Spotify tools for control
+2. For "what's playing" queries, use get_current_song and return just the track info
+3. For play requests, search if needed, then play the track
+4. Provide helpful feedback about what actions were taken
 
 For all other requests:
 1. Be helpful and concise
@@ -403,70 +362,6 @@ For all other requests:
             # If no tool calls, move to the end
             return "end"
         
-        # Define a function to check if we should route to play_response
-        @traceable(name="Play Music Condition", run_type="chain")
-        def check_play_music(state):
-            # Get the last message from the state
-            messages = state.get("messages", [])
-            if not messages:
-                return "agent"  # Default back to agent if no messages
-            
-            # Check if the last message is a tool message
-            last_message = messages[-1]
-            if not isinstance(last_message, ToolMessage):
-                return "agent"  # Not a tool message, go back to agent
-            
-            # Check if this is a music play tool result
-            tool_name = getattr(last_message, "name", None)
-            tool_content = getattr(last_message, "content", "")
-            
-            # Look for music play tools based on name pattern and content
-            is_music_play = tool_name == "play"
-            
-            # If this is a music play tool response, route to play_response
-            if is_music_play:
-                return "play_response"
-            
-            # Otherwise, go back to agent
-            return "agent"
-        
-        # Create a dedicated play_response node that skips LLM invocation
-        @traceable(name="Play Response", run_type="chain")
-        def play_response(state: AgentState):
-            # Get the last message (which should be a ToolMessage)
-            last_message = state["messages"][-1] if state["messages"] else None
-            
-            # Extract song information from the tool message
-            song_info = current_music_info["current_song"]
-            # Try to get a more accurate song name from the tool message
-            if isinstance(last_message, ToolMessage) and hasattr(last_message, "content"):
-                tool_content = last_message.content
-                
-                # Try to parse JSON if it looks like JSON
-                try:
-                    if "{" in tool_content and "}" in tool_content:
-                        data = json.loads(tool_content)
-                        if isinstance(data, dict):
-                            if "track_name" in data and "artist" in data:
-                                song_info = f"{data['artist']} - {data['track_name']}"
-                            elif "current_track" in data:
-                                song_info = data["message"]
-                except Exception:
-                    pass
-                
-            
-            # Create a simple response with just the song name
-            # This follows the system requirements to only return the exact song name
-            response_message = AIMessage(content=f"{song_info}")
-            
-            # Update the current_music_info
-            current_music_info["current_song"] = song_info
-            
-            # Return the response
-            return AgentResponse(
-                messages=[AIMessage(content=f"Now playing {song_info}")]
-            ).model_dump()
-        
         # Define a function to add messages to state
         def add_messages_to_state(state, new_state):
             """Add messages from new_state to the current state."""
@@ -483,7 +378,6 @@ For all other requests:
         # Add nodes
         builder.add_node("agent", agent)
         builder.add_node("tools", tool_node)
-        builder.add_node("play_response", play_response)
         
         # Set the edge properties
         builder.add_edge(START, "agent")
@@ -498,21 +392,15 @@ For all other requests:
             }
         )
         
-        # Add conditional edges from tools node
-        builder.add_conditional_edges(
-            "tools",
-            check_play_music,
-            {
-                "play_response": "play_response",
-                "agent": "agent"
-            }
-        )
-        
-        # Add edge from play_response to end
-        builder.add_edge("play_response", END)
+        # All tool outputs go back to the agent
+        builder.add_edge("tools", "agent")
         
         # Compile and yield the graph
-        graph = builder.compile()
+        graph = builder.compile(
+            # Set a higher recursion limit to handle complex workflows
+            # but still prevent infinite loops
+            debug=True
+        )
 
         # Check if we have a Home Assistant turn_on tool and print its details
         turn_on_tool = next((tool for tool in all_tools if "turn_on" in getattr(tool, "name", "")), None)

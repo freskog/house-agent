@@ -44,3 +44,5 @@ langchain-mcp-adapters>=0.1.1
 langchain-community>=0.3.24
 langchain-openai>=0.3.18
 langgraph-cli[inmem]
+# Spotify Web API
+spotipy>=2.25.1
