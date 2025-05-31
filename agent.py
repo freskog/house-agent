@@ -362,6 +362,51 @@ For all other requests:
             # If no tool calls, move to the end
             return "end"
         
+        # Add conditional routing after tool execution
+        @traceable(name="Post Tools Routing", run_type="chain")
+        def should_continue_after_tools(state):
+            """Determine if we should continue to agent or end directly after tool execution."""
+            # Get the last few messages to find the tool result
+            messages = state["messages"]
+            if not messages:
+                return "agent"
+            
+            # Look for the most recent ToolMessage
+            for message in reversed(messages):
+                if isinstance(message, ToolMessage):
+                    # Check if it was a music control command by looking at the name field first
+                    tool_name = getattr(message, 'name', '')
+                    
+                    # If name is not available, we need to find the tool name another way
+                    # We'll look at the previous AIMessage to see what tool was called
+                    if not tool_name:
+                        # Find the AIMessage that called this tool
+                        message_index = messages.index(message)
+                        for i in range(message_index - 1, -1, -1):
+                            prev_msg = messages[i]
+                            if isinstance(prev_msg, AIMessage) and hasattr(prev_msg, 'tool_calls') and prev_msg.tool_calls:
+                                # Match by tool_call_id
+                                for tool_call in prev_msg.tool_calls:
+                                    if hasattr(tool_call, 'id') and tool_call.id == message.tool_call_id:
+                                        tool_name = getattr(tool_call, 'name', '')
+                                        break
+                                if tool_name:
+                                    break
+                    
+                    # Check if it was a music control command
+                    if tool_name in ["play_music", "pause_music", "next_track", "previous_track", "set_volume"]:
+                        # Check if the command succeeded (empty content or no error message)
+                        content = getattr(message, 'content', '')
+                        if not content or not any(error_word in content.lower() for error_word in ["failed", "error", "no tracks found"]):
+                            print(f"Music command '{tool_name}' succeeded silently, routing to END")
+                            return "end"
+                        else:
+                            print(f"Music command '{tool_name}' failed: {content}, routing to agent")
+                    break
+            
+            # Default: continue to agent for all other cases
+            return "agent"
+        
         # Define a function to add messages to state
         def add_messages_to_state(state, new_state):
             """Add messages from new_state to the current state."""
@@ -392,8 +437,15 @@ For all other requests:
             }
         )
         
-        # All tool outputs go back to the agent
-        builder.add_edge("tools", "agent")
+        # Add conditional routing from tools - either back to agent or directly to end
+        builder.add_conditional_edges(
+            "tools",
+            should_continue_after_tools,
+            {
+                "agent": "agent",
+                "end": END
+            }
+        )
         
         # Compile and yield the graph
         graph = builder.compile(
