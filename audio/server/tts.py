@@ -200,12 +200,13 @@ class TTSEngine:
             text: Text to convert to speech
             
         Returns:
-            bytes: Audio data (WAV format)
+            bytes: Audio data (WAV format), or None if text is empty/whitespace-only
         """
         print(f"TTS synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
         
-        if not text:
-            print("Empty text provided to synthesize method")
+        # Handle empty or whitespace-only text as "don't say anything"
+        if not text or not str(text).strip():
+            print("Empty or whitespace-only text provided - returning None (silent)")
             return None
             
         if not self.is_initialized():
@@ -216,7 +217,7 @@ class TTSEngine:
         print(f"TTS engine initialized, proceeding with synthesis")
 
         # Split text into chunks if needed
-        chunks = self._preprocess_text(text)
+        chunks = self._preprocess_text(str(text).strip())
         
         if not chunks:
             print("Text preprocessing returned no chunks")
@@ -280,8 +281,9 @@ class TTSEngine:
         """
         print(f"TTS streaming synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
         
-        if not text:
-            print("Empty text provided to synthesize_streaming method")
+        # Handle empty or whitespace-only text as "don't say anything"
+        if not text or not str(text).strip():
+            print("Empty or whitespace-only text provided - yielding nothing (silent)")
             return
             
         if not self.is_initialized():
@@ -292,7 +294,7 @@ class TTSEngine:
         print(f"TTS engine initialized, proceeding with streaming synthesis")
 
         # Split text into sentences or natural speech pauses
-        sentences = self._preprocess_text(text)
+        sentences = self._preprocess_text(str(text).strip())
         
         if not sentences:
             print("Text preprocessing returned no sentences")

@@ -101,7 +101,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
                     # Update state to reflect music is now playing
                     # We could call get_current_song here, but let's just indicate something is playing
                     update_music_state("Music is playing")
-                    return "Music started playing"
+                    return ""  # Return empty string for silent operation
                 else:
                     return "Failed to start music playback"
                 
@@ -122,7 +122,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
                 if success:
                     state = f"Currently playing: '{song}' by {artist}"
                     update_music_state(state)
-                    return f"Now playing: '{song}' by {artist}"
+                    return ""  # Return empty string for silent operation
                 else:
                     return "Failed to start music playback"
             else:
@@ -130,7 +130,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
                 success = spotify_client.play()
                 if success:
                     update_music_state("Music resumed")
-                    return "Music resumed"
+                    return ""  # Return empty string for silent operation
                 else:
                     return "Failed to resume music playback"
                 
@@ -144,7 +144,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             success = spotify_client.pause()
             if success:
                 update_music_state("Music paused")
-                return "Music paused"
+                return ""  # Return empty string for silent operation
             else:
                 return "Failed to pause music"
         except Exception as e:
@@ -165,7 +165,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             success = spotify_client.pause()
             if success:
                 update_music_state("Music stopped")
-                return "Music stopped"
+                return ""  # Return empty string for silent operation
             else:
                 return "Failed to stop music"
         except Exception as e:
@@ -176,7 +176,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Skip to the next track."""
         try:
             success = spotify_client.next_track()
-            return "Skipped to next track" if success else "Failed to skip to next track"
+            return "" if success else "Failed to skip to next track"  # Silent on success
         except Exception as e:
             logger.error(f"Error skipping track: {e}")
             return f"Error skipping track: {str(e)}"
@@ -185,7 +185,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Go back to the previous track."""
         try:
             success = spotify_client.previous_track()
-            return "Went back to previous track" if success else "Failed to go to previous track"
+            return "" if success else "Failed to go to previous track"  # Silent on success
         except Exception as e:
             logger.error(f"Error going to previous track: {e}")
             return f"Error going to previous track: {str(e)}"
@@ -194,7 +194,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Set the music volume (0-100)."""
         try:
             success = spotify_client.set_volume(volume)
-            return f"Volume set to {volume}%" if success else "Failed to set volume"
+            return "" if success else "Failed to set volume"  # Silent on success
         except Exception as e:
             logger.error(f"Error setting volume: {e}")
             return f"Error setting volume: {str(e)}"

@@ -128,7 +128,7 @@ def clean_text_for_tts(text: str) -> str:
     
     # If we've removed too much, make sure there's still some text
     if not text:
-        return "OK."
+        return ""  # Return empty string for silent responses instead of "OK."
     
     return text
 
@@ -292,6 +292,42 @@ class AgentInterface:
             self.client_conversation_history[current_client] = []
         self.client_conversation_history[current_client].append(AIMessage(content=cleaned_response))
         
+        # Check if this is an intentionally silent response (from silent_end node for music commands)
+        # Only treat as silent if it's a music control command that succeeded
+        is_silent_music_response = False
+        if graph_has_ended and not cleaned_response.strip():
+            print(f"DEBUG: Checking for silent music response. Messages count: {len(result['messages']) if result and 'messages' in result else 0}")
+            # Check if the last AI message before this one had a music control tool call
+            if result and "messages" in result and len(result["messages"]) >= 2:
+                print("DEBUG: Searching for music control tool calls in message history")
+                # Look for the second-to-last message (should be an AI message with tool calls)
+                for i, msg in enumerate(reversed(result["messages"][:-1])):  # Skip the last (current) message
+                    print(f"DEBUG: Message {i}: type={type(msg).__name__}, has_tool_calls={hasattr(msg, 'tool_calls')}")
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        print(f"DEBUG: Found message with {len(msg.tool_calls)} tool calls")
+                        for tool_call in msg.tool_calls:
+                            # Handle both attribute and dictionary access for tool_call name
+                            tool_name = ''
+                            if hasattr(tool_call, 'name'):
+                                tool_name = tool_call.name
+                            elif isinstance(tool_call, dict) and 'name' in tool_call:
+                                tool_name = tool_call['name']
+                            elif hasattr(tool_call, 'get'):
+                                tool_name = tool_call.get('name', '')
+                            
+                            print(f"DEBUG: Tool call: {tool_name} (type: {type(tool_call).__name__})")
+                            if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume"]:
+                                print(f"Detected successful music control command '{tool_name}' with empty response - this is intentionally silent")
+                                is_silent_music_response = True
+                                break
+                        if is_silent_music_response:
+                            break
+        
+        if is_silent_music_response:
+            print("Silent music command response - hanging up without TTS")
+            await self.hang_up("")  # Empty string means no goodbye message
+            return ""
+        
         # Split the response into sentences for streaming
         # This regex splits on sentence boundaries while preserving punctuation
         sentences = re.split(r'(?<=[.!?])\s+', cleaned_response)
@@ -329,11 +365,13 @@ class AgentInterface:
                         print("Both streaming and non-streaming TTS failed")
                 
                 # If the graph has reached its end node, hang up silently after sending the response
-                if graph_has_ended:
+                # NOTE: Silent responses (empty content) are now handled earlier in the function
+                # This section only handles responses that have content but still need hang up
+                if graph_has_ended and cleaned_response.strip():
                     # Double-check that the cleaned response doesn't end with a question mark
                     # as TTS cleaning might have modified the content
                     if not cleaned_response.strip().endswith('?'):
-                        print("Hanging up silently as graph has reached the END node")
+                        print("Hanging up silently as graph has reached the END node (after response)")
                         await self.hang_up("")  # Empty string means no goodbye message
                         return ""
                     else:

@@ -238,8 +238,27 @@ async def make_graph():
         except Exception as e:
             print(f"Failed to list prompts: {e}")
         
-        # Initialize current song as placeholder (will be replaced by Spotify integration)
+        # Check current music state instead of hardcoding "Nothing playing"
         current_song = "Nothing playing"
+        if spotify_tools:
+            try:
+                # Find the get_current_song tool and call it to get the actual current state
+                get_current_song_tool = None
+                for tool in spotify_tools:
+                    if hasattr(tool, 'name') and tool.name == 'get_current_song':
+                        get_current_song_tool = tool
+                        break
+                
+                if get_current_song_tool:
+                    print("Checking current music state on startup...")
+                    current_song = get_current_song_tool.func()
+                    print(f"Current music state: {current_song}")
+                else:
+                    print("Warning: get_current_song tool not found, using default state")
+            except Exception as e:
+                print(f"Warning: Could not check current music state on startup: {e}")
+                current_song = "Nothing playing"
+        
         current_music_info["current_song"] = current_song
 
         # Create enhanced system message with date and custom instructions
@@ -395,19 +414,32 @@ For all other requests:
                                 if tool_name:
                                     break
                     
+                    print(f"DEBUG: Found tool message - tool_name='{tool_name}', content='{getattr(message, 'content', '')}'")
+                    
                     # Check if it was a music control command
                     if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume"]:
-                        # Check if the command succeeded (empty content or no error message)
+                        # Check if the command succeeded - successful commands now return empty content
                         content = getattr(message, 'content', '')
-                        if not content or not any(error_word in content.lower() for error_word in ["failed", "error", "no tracks found"]):
-                            print(f"Music command '{tool_name}' succeeded silently, routing to END")
-                            return "end"
+                        
+                        # Music commands succeed if they return empty content or don't contain error indicators
+                        if not content or not any(error_word in content.lower() for error_word in ["failed", "error", "no tracks found", "unauthorized", "not found"]):
+                            print(f"Music command '{tool_name}' succeeded (empty content), routing to silent_end")
+                            return "silent_end"
                         else:
                             print(f"Music command '{tool_name}' failed: {content}, routing to agent")
+                            return "agent"
                     break
             
             # Default: continue to agent for all other cases
+            print("DEBUG: No music command detected, routing to agent")
             return "agent"
+        
+        # Add a silent end node for music commands
+        @traceable(name="Silent End", run_type="chain")
+        def silent_end(state):
+            """End silently without any response for successful music commands."""
+            # Return an empty AIMessage to prevent TTS output
+            return {"messages": [AIMessage(content="")]}
         
         # Define a function to add messages to state
         def add_messages_to_state(state, new_state):
@@ -425,6 +457,7 @@ For all other requests:
         # Add nodes
         builder.add_node("agent", agent)
         builder.add_node("tools", tool_node)
+        builder.add_node("silent_end", silent_end)
         
         # Set the edge properties
         builder.add_edge(START, "agent")
@@ -439,15 +472,18 @@ For all other requests:
             }
         )
         
-        # Add conditional routing from tools - either back to agent or directly to end
+        # Add conditional routing from tools - either back to agent, to silent end, or to regular end
         builder.add_conditional_edges(
             "tools",
             should_continue_after_tools,
             {
                 "agent": "agent",
-                "end": END
+                "silent_end": "silent_end"
             }
         )
+        
+        # Add edge from silent_end to END
+        builder.add_edge("silent_end", END)
         
         # Compile and yield the graph
         graph = builder.compile(
