@@ -108,12 +108,13 @@ class SpotifyClient:
             logger.error(f"Error getting current playback: {e}")
             return None
             
-    def play(self, uri: Optional[str] = None, device_id: Optional[str] = None) -> bool:
+    def play(self, uri: Optional[str] = None, context_uri: Optional[str] = None, device_id: Optional[str] = None) -> bool:
         """
         Start or resume playback.
         
         Args:
-            uri: Optional Spotify URI to play (track, album, playlist)
+            uri: Optional Spotify URI to play (single track)
+            context_uri: Optional Spotify context URI (album, playlist, artist)
             device_id: Optional device ID. Uses spotifyd device if not specified.
             
         Returns:
@@ -126,13 +127,43 @@ class SpotifyClient:
                 
             target_device = device_id or self.get_spotifyd_device_id()
             
-            if uri:
+            if context_uri:
+                # Play a context (album, playlist, artist)
+                spotify.start_playback(device_id=target_device, context_uri=context_uri)
+            elif uri:
+                # Play a single track
                 spotify.start_playback(device_id=target_device, uris=[uri])
             else:
+                # Resume playback
                 spotify.start_playback(device_id=target_device)
             return True
         except Exception as e:
             logger.error(f"Error starting playback: {e}")
+            return False
+            
+    def play_tracks(self, track_uris: List[str], device_id: Optional[str] = None) -> bool:
+        """
+        Play a list of tracks in sequence.
+        
+        Args:
+            track_uris: List of Spotify track URIs to play
+            device_id: Optional device ID. Uses spotifyd device if not specified.
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            spotify = self._get_spotify_instance()
+            if not spotify:
+                return False
+                
+            target_device = device_id or self.get_spotifyd_device_id()
+            
+            # Play the list of tracks
+            spotify.start_playback(device_id=target_device, uris=track_uris)
+            return True
+        except Exception as e:
+            logger.error(f"Error playing track list: {e}")
             return False
             
     def pause(self, device_id: Optional[str] = None) -> bool:

@@ -282,20 +282,32 @@ Audio-Only Communication Guidelines:
 
 You have access to various tools to help control the home and get information. Use these tools when appropriate to help the user.
 
-Music Control (Spotify Web API):
+Enhanced Music Control (Spotify Web API with Smart Playback):
 - Use get_current_song to check what's currently playing
-- Use play_music to search and play tracks, albums, or artists
+- Use play_music for intelligent music playback that supports:
+  * Specific tracks, artists, albums with automatic recommendations for continuous playback
+  * Genre queries (like "80s rock", "chill music", "workout songs") with randomized selection
+  * Album/playlist context playback for natural continuous listening
+  * Automatic creation of music queues based on similar songs
+- Use create_radio_station to create personalized radio stations from artists, tracks, or genres
 - Use pause_music, stop_music, next_track, previous_track for playback control
 - Use set_volume to adjust volume (0-100)
 - Use search_music to find specific tracks and get their URIs
 - Use get_spotify_devices to see available playback devices
 
+Smart Music Playback Features:
+- When users ask for genres or styles, the system will find playlists or albums for better continuous playback
+- When playing individual tracks, the system automatically adds similar songs to create a radio-like experience
+- Genre queries get randomized to provide variety - you won't hear the same song every time
+- Context-aware playback means albums play in full, playlists continue naturally
+
 When the user asks about music:
-1. Use the appropriate Spotify tools for control
+1. Use play_music for most music requests - it now handles context and recommendations automatically
 2. For "what's playing" queries, use get_current_song and return just the track info
-3. For play requests, search if needed, then play the track
-4. For stop/pause requests, use stop_music or pause_music
-5. Provide helpful feedback about what actions were taken
+3. For genre/mood requests, play_music will intelligently find appropriate content and randomize selection
+4. For creating custom radio stations, use create_radio_station with seed artists, tracks, or genres
+5. For stop/pause requests, use stop_music or pause_music
+6. Provide helpful feedback about what actions were taken
 
 For all other requests:
 1. Be helpful and concise
@@ -429,7 +441,7 @@ For all other requests:
                     print(f"DEBUG: Found tool message - tool_name='{tool_name}', content='{getattr(message, 'content', '')}'")
                     
                     # Check if it was a music control command
-                    if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume"]:
+                    if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume", "create_radio_station"]:
                         # Check if the command succeeded - successful commands now return empty content
                         content = getattr(message, 'content', '')
                         
