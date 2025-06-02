@@ -99,10 +99,63 @@ class Transcriber:
             print(f"Error initializing transcription model: {e}")
             return False
     
+    def _convert_audio_to_numpy(self, audio_data: bytes, sample_rate: int = 16000) -> np.ndarray:
+        """Convert raw audio bytes to normalized numpy array for Whisper
+        
+        Args:
+            audio_data: Raw audio data as bytes (16-bit, mono PCM)
+            sample_rate: Sample rate of the audio
+            
+        Returns:
+            Normalized float32 numpy array suitable for Whisper
+        """
+        # Convert bytes to int16 numpy array
+        audio_np = np.frombuffer(audio_data, dtype=np.int16)
+        
+        # Normalize to float32 in the range [-1.0, 1.0] as expected by Whisper
+        # Whisper expects audio normalized to [-1, 1] range
+        audio_float = audio_np.astype(np.float32) / 32768.0
+        
+        return audio_float
+    
+    def _apply_audio_gain_optimization(self, audio_np: np.ndarray) -> tuple[np.ndarray, float]:
+        """Apply gain optimization to improve transcription quality for quiet audio
+        
+        Args:
+            audio_np: Original audio array (int16)
+            
+        Returns:
+            Tuple of (optimized_audio_bytes, applied_gain_factor)
+        """
+        # Calculate RMS for volume detection
+        audio_rms = np.sqrt(np.mean(audio_np.astype(np.float32)**2))
+        
+        # Apply gain if audio is too quiet but not silent - IMPORTANT FOR QUALITY
+        if 10.0 < audio_rms < 200.0:
+            # Calculate a reasonable gain factor (amplify quiet audio)
+            target_rms = 2000.0  # Target a moderate RMS level
+            gain_factor = min(target_rms / audio_rms, 15.0)  # Cap gain to avoid excessive amplification
+            
+            # Apply gain (being careful to avoid integer overflow)
+            audio_np_float = audio_np.astype(np.float32)
+            audio_np_float = audio_np_float * gain_factor
+            
+            # Clip to int16 range
+            audio_np_float = np.clip(audio_np_float, -32768, 32767)
+            audio_np_optimized = audio_np_float.astype(np.int16)
+            
+            # Recalculate RMS after gain
+            new_rms = np.sqrt(np.mean(audio_np_optimized.astype(np.float32)**2))
+            print(f"Amplified quiet audio: gain={gain_factor:.1f}x, RMS {audio_rms:.2f} -> {new_rms:.2f}")
+            
+            return audio_np_optimized.tobytes(), gain_factor
+        else:
+            return audio_np.tobytes(), 1.0
+
     @traceable(run_type="chain", name="Audio_Transcription")
     def transcribe_audio(self, audio_data: bytes, sample_rate: int = 16000, thread_id: Optional[str] = None) -> TranscriptionResult:
         """
-        Transcribe audio data to text directly from memory
+        Transcribe audio data to text using optimized in-memory processing
         
         Args:
             audio_data: Raw audio data as bytes (assumed to be 16-bit, mono PCM)
@@ -137,31 +190,9 @@ class Transcriber:
             channels = 1  # Mono
             duration = len(audio_data) / (bytes_per_sample * channels * sample_rate)
             
-            # Check if audio has content
+            # Convert to numpy and check if audio has content
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             audio_rms = np.sqrt(np.mean(audio_np.astype(np.float32)**2))
-            
-            # Apply gain if audio is too quiet but not silent - IMPORTANT FOR QUALITY
-            # This block actually improves transcription quality significantly
-            if 10.0 < audio_rms < 200.0:
-                # Calculate a reasonable gain factor (amplify quiet audio)
-                target_rms = 2000.0  # Target a moderate RMS level
-                gain_factor = min(target_rms / audio_rms, 15.0)  # Cap gain to avoid excessive amplification
-                
-                # Apply gain (being careful to avoid integer overflow)
-                audio_np_float = audio_np.astype(np.float32)
-                audio_np_float = audio_np_float * gain_factor
-                
-                # Clip to int16 range
-                audio_np_float = np.clip(audio_np_float, -32768, 32767)
-                audio_np = audio_np_float.astype(np.int16)
-                
-                # Replace the original audio data
-                audio_data = audio_np.tobytes()
-                
-                # Recalculate RMS after gain
-                audio_rms = np.sqrt(np.mean(audio_np.astype(np.float32)**2))
-                print(f"Amplified quiet audio: gain={gain_factor:.1f}x, new RMS={audio_rms:.2f}")
             
             # Check if audio is too quiet - provide a fallback
             if audio_rms < 100:  # Arbitrary threshold, adjust as needed
@@ -179,9 +210,81 @@ class Transcriber:
             if len(audio_data) < 1000:
                 print(f"Warning: Audio data very short ({len(audio_data)} bytes)")
             
+            # Apply gain optimization if needed
+            optimized_audio_data, gain_factor = self._apply_audio_gain_optimization(audio_np)
+            
+            # Convert optimized audio to normalized numpy array for Whisper
+            audio_float = self._convert_audio_to_numpy(optimized_audio_data, sample_rate)
+            
             # Verify CoreML settings
             coreml_setting = os.environ.get("WHISPER_COREML", "Not set")
             print(f"CoreML setting: WHISPER_COREML={coreml_setting}")
+            
+            # Set C locale again before transcription
+            os.environ['LC_ALL'] = 'C'
+            os.environ['LANG'] = 'C'
+            os.environ['LANGUAGE'] = 'C'
+            
+            # Run transcription using optimized in-memory processing
+            start_time = time.time()
+            print(f"Starting whisper transcription with in-memory processing...")
+            
+            # Use numpy array directly - this eliminates file I/O completely!
+            segments = self.model.transcribe(audio_float)
+            process_time = time.time() - start_time
+            
+            # Extract result
+            segments_list = list(segments)
+            text = " ".join(segment.text for segment in segments_list)
+            
+            # If transcription produced no text, provide a fallback response
+            if not text.strip():
+                print(f"Empty transcription after {process_time:.2f}s, using fallback")
+                return TranscriptionResult(
+                    text="I could not understand that. Could you please speak more clearly?",
+                    language="en",
+                    duration=duration,
+                    process_time=process_time,
+                    thread_id=thread_id
+                )
+                
+            # Create segments array in the expected format
+            segments_formatted = []
+            for i, segment in enumerate(segments_list):
+                segments_formatted.append({
+                    "id": i,
+                    "text": segment.text,
+                    "start": segment.start_time if hasattr(segment, 'start_time') else 0.0,
+                    "end": segment.end_time if hasattr(segment, 'end_time') else 0.0
+                })
+            
+            # Create and return the result
+            result = TranscriptionResult(
+                text=text.strip(),
+                language="en",  # Currently hardcoded language
+                segments=segments_formatted,
+                duration=duration,
+                process_time=process_time,
+                thread_id=thread_id
+            )
+            
+            print(f"Transcription completed in {process_time:.2f}s (gain: {gain_factor:.1f}x)")
+            return result
+            
+        except Exception as e:
+            print(f"Transcription error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback: try the old file-based method if numpy method fails
+            print("Attempting fallback to file-based transcription...")
+            return self._transcribe_fallback_file_method(audio_data, sample_rate, thread_id)
+            
+    def _transcribe_fallback_file_method(self, audio_data: bytes, sample_rate: int, thread_id: Optional[str]) -> TranscriptionResult:
+        """Fallback file-based transcription method in case numpy method fails"""
+        try:
+            # Calculate audio duration
+            duration = len(audio_data) / (2 * sample_rate)  # 16-bit = 2 bytes per sample
             
             # Save to a temporary file - pywhispercpp requires a file path
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as temp_file:
@@ -194,16 +297,10 @@ class Transcriber:
                     wf.setframerate(sample_rate)
                     wf.writeframes(audio_data)
                 
-                print(f"Temporary file created: {temp_path}")
-                
-                # Set C locale again before transcription
-                os.environ['LC_ALL'] = 'C'
-                os.environ['LANG'] = 'C'
-                os.environ['LANGUAGE'] = 'C'
+                print(f"Fallback: Using temporary file {temp_path}")
                 
                 # Run transcription
                 start_time = time.time()
-                print(f"Starting whisper transcription with C locale...")
                 segments = self.model.transcribe(temp_path)
                 process_time = time.time() - start_time
                 
@@ -211,18 +308,9 @@ class Transcriber:
                 segments_list = list(segments)
                 text = " ".join(segment.text for segment in segments_list)
                 
-                # If transcription produced no text, provide a fallback response
                 if not text.strip():
-                    print(f"Empty transcription after {process_time:.2f}s, using fallback")
-                    return TranscriptionResult(
-                        text="I could not understand that. Could you please speak more clearly?",
-                        language="en",
-                        duration=duration,
-                        process_time=process_time,
-                        thread_id=thread_id
-                    )
-                    
-                # Create segments array in the expected format
+                    text = "I could not understand that. Could you please speak more clearly?"
+                
                 segments_formatted = []
                 for i, segment in enumerate(segments_list):
                     segments_formatted.append({
@@ -232,25 +320,17 @@ class Transcriber:
                         "end": segment.end_time if hasattr(segment, 'end_time') else 0.0
                     })
                 
-                # Create and return the result
-                result = TranscriptionResult(
+                return TranscriptionResult(
                     text=text.strip(),
-                    language="en",  # Currently hardcoded language
+                    language="en",
                     segments=segments_formatted,
                     duration=duration,
                     process_time=process_time,
                     thread_id=thread_id
                 )
                 
-                print(f"Transcription completed in {process_time:.2f}s")
-                return result
-            
-        except Exception as e:
-            print(f"Transcription error: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Return a failure result
+        except Exception as fallback_error:
+            print(f"Fallback transcription also failed: {fallback_error}")
             return TranscriptionResult(
                 text="Sorry, there was an error processing your speech.",
                 language="en",

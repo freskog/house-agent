@@ -128,10 +128,11 @@ class TTSEngine:
             return [text]
     
     @traceable(run_type="chain", name="TTS_Generate_Audio_Chunk")
-    async def _generate_audio(self, text):
-        """Generate audio from text using Kokoro pipeline
+    async def _generate_audio_numpy(self, text):
+        """Generate audio from text using Kokoro pipeline, returning numpy array
         
         Optimized for single sentences or small chunks of text.
+        Returns raw numpy array to avoid WAV conversion overhead.
         """
         try:
             if not self.pipeline:
@@ -179,15 +180,54 @@ class TTSEngine:
                 print("No audio generated")
                 return None
                 
-            # Convert to bytes (WAV format)
-            buffer = io.BytesIO()
-            sf.write(buffer, audio_data, 24000, format="WAV", subtype="PCM_16")
-            buffer.seek(0)
-            
-            return buffer.read()
+            # Return raw numpy array - no WAV conversion here!
+            return audio_data
             
         except Exception as e:
             print(f"Kokoro TTS error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    async def _generate_audio(self, text):
+        """Legacy method that converts numpy to WAV - kept for backward compatibility"""
+        audio_np = await self._generate_audio_numpy(text)
+        if audio_np is None:
+            return None
+            
+        # Convert to bytes (WAV format) only when needed
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_np, 24000, format="WAV", subtype="PCM_16")
+        buffer.seek(0)
+        
+        return buffer.read()
+    
+    def _combine_audio_numpy(self, audio_arrays):
+        """Combine multiple numpy audio arrays efficiently
+        
+        Args:
+            audio_arrays: List of numpy audio arrays
+            
+        Returns:
+            numpy.ndarray: Combined audio array
+        """
+        if not audio_arrays:
+            print("No audio arrays to combine")
+            return None
+            
+        # If only one array, return it directly
+        if len(audio_arrays) == 1:
+            return audio_arrays[0]
+            
+        try:
+            # Simple numpy concatenation - much more efficient than WAV parsing
+            print(f"Concatenating {len(audio_arrays)} audio arrays...")
+            combined = np.concatenate(audio_arrays)
+            print(f"Combined audio: {len(combined)} samples")
+            return combined
+            
+        except Exception as e:
+            print(f"Error combining audio arrays: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -225,10 +265,28 @@ class TTSEngine:
             
         print(f"Processing {len(chunks)} text chunks for TTS")
         
-        audio_chunks = []
-        total_len = 0
+        # If only one chunk, optimize for single chunk case
+        if len(chunks) == 1:
+            chunk = chunks[0].strip()
+            if not chunk:
+                print("Single chunk is empty")
+                return None
+                
+            print(f"Generating audio for single chunk: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
+            # Generate directly as WAV for single chunk
+            audio_data = await self._generate_audio(chunk)
+            
+            if audio_data:
+                print(f"Generated {len(audio_data)} bytes of audio for single chunk")
+                return audio_data
+            else:
+                print("Failed to generate audio for single chunk")
+                return None
         
-        # Process each chunk in sequence
+        # Multiple chunks - use optimized numpy array processing
+        audio_arrays = []
+        
+        # Process each chunk and collect numpy arrays
         for i, chunk in enumerate(chunks):
             chunk = chunk.strip()
             if not chunk:
@@ -236,38 +294,38 @@ class TTSEngine:
                 continue
                 
             print(f"Generating audio for chunk {i+1}/{len(chunks)}: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
-            audio_data = await self._generate_audio(chunk)
+            audio_np = await self._generate_audio_numpy(chunk)
             
-            if audio_data:
-                audio_chunks.append(audio_data)
-                total_len += len(audio_data)
-                print(f"Generated {len(audio_data)} bytes of audio for chunk {i+1}")
+            if audio_np is not None:
+                audio_arrays.append(audio_np)
+                print(f"Generated {len(audio_np)} samples for chunk {i+1}")
             else:
                 print(f"Failed to generate audio for chunk {i+1}")
         
-        if not audio_chunks:
-            print("No audio chunks were generated")
+        if not audio_arrays:
+            print("No audio arrays were generated")
             return None
         
-        # If only one chunk, return it directly
-        if len(audio_chunks) == 1:
-            print("Returning single audio chunk")
-            return audio_chunks[0]
+        # Combine all numpy arrays efficiently
+        combined_audio = self._combine_audio_numpy(audio_arrays)
         
-        # Otherwise, concatenate all chunks
-        print(f"Combining {len(audio_chunks)} audio chunks (total {total_len} bytes)")
-        combined_audio = self._combine_audio_chunks(audio_chunks)
+        if combined_audio is None:
+            print("Failed to combine audio arrays")
+            return None
         
-        if combined_audio:
-            print(f"Combined audio size: {len(combined_audio)} bytes")
-        else:
-            print("Failed to combine audio chunks")
-            # Fallback to the first chunk if combination fails
-            if audio_chunks:
-                print("Falling back to first audio chunk")
-                return audio_chunks[0]
-        
-        return combined_audio
+        # Convert final combined array to WAV only once
+        try:
+            buffer = io.BytesIO()
+            sf.write(buffer, combined_audio, 24000, format="WAV", subtype="PCM_16")
+            buffer.seek(0)
+            final_audio = buffer.read()
+            
+            print(f"Final combined audio size: {len(final_audio)} bytes")
+            return final_audio
+            
+        except Exception as e:
+            print(f"Error converting final audio to WAV: {e}")
+            return None
     
     @traceable(run_type="chain", name="TTS_Synthesize_Speech_Streaming")
     async def synthesize_streaming(self, text):
@@ -332,7 +390,7 @@ class TTSEngine:
                 # Continue to next sentence on error
     
     def _combine_audio_chunks(self, audio_chunks):
-        """Combine multiple WAV audio chunks into a single audio stream
+        """Legacy method for combining WAV chunks - kept for backward compatibility
         
         Args:
             audio_chunks: List of WAV audio data bytes

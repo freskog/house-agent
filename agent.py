@@ -269,6 +269,17 @@ Currently playing: {current_song}
 
 {homeassistant_content if homeassistant_content else ''}
 
+IMPORTANT: This is an AUDIO-ONLY interface. Users interact with you through voice commands and hear your responses as synthesized speech.
+
+Audio-Only Communication Guidelines:
+- NEVER include URLs, links, web addresses, or references to clicking/viewing anything
+- NEVER include visual formatting like bullet points, numbered lists, or special characters
+- Speak in complete, flowing sentences as if having a natural conversation
+- Describe things verbally rather than pointing to visual elements
+- Keep responses concise and conversational
+- If you need to list items, use natural speech patterns like "first," "second," or "also"
+- Remember the user cannot see anything - only hear your voice
+
 You have access to various tools to help control the home and get information. Use these tools when appropriate to help the user.
 
 Music Control (Spotify Web API):
@@ -290,7 +301,8 @@ For all other requests:
 1. Be helpful and concise
 2. Use tools when needed
 3. Don't make assumptions about what the user wants
-4. Ask for clarification if needed"""
+4. Ask for clarification if needed
+5. Remember this is a voice conversation - speak naturally and conversationally"""
 
         # Cache the system message
         cached_system_message = enhanced_system_message
