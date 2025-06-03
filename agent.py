@@ -3,13 +3,48 @@ from langgraph.graph import StateGraph, START, END
 from typing import Annotated, List, Dict, Any, Optional, Generator
 from typing_extensions import TypedDict
 
+import os
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv(override = True)
+
+# Explicitly disable all LangSmith tracing to prevent warnings - MUST be before any imports
+os.environ["LANGSMITH_TRACING_V2"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"  # Legacy variable
+print("LangSmith tracing explicitly disabled")
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.tools import BaseTool
-from langsmith import traceable, Client
-from langsmith.wrappers import wrap_openai
+
+# Import LangSmith conditionally to avoid auto-tracing
+try:
+    # Only import LangSmith if tracing is explicitly enabled
+    if os.environ.get("LANGSMITH_TRACING_V2", "false").lower() == "true":
+        from langsmith import traceable, Client
+        from langsmith.wrappers import wrap_openai
+        print("LangSmith imports loaded for tracing")
+    else:
+        # Create dummy decorators when LangSmith is disabled
+        def traceable(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        Client = None
+        wrap_openai = None
+        print("LangSmith disabled - using dummy decorators")
+except ImportError:
+    # Fallback if langsmith is not available
+    def traceable(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    Client = None
+    wrap_openai = None
+    print("LangSmith not available - using dummy decorators")
 
 from pydantic import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient, SSEConnection
@@ -20,12 +55,10 @@ from audio.server.protocol import Message, ToolEventType
 
 # Import Spotify integration
 from spotify import SpotifyClient, create_spotify_tools
-from spotify.tools import current_music_state
+from spotify.tools import current_music_state, get_current_song_startup_async
 
 import asyncio
-import os
 import json
-from dotenv import load_dotenv
 from datetime import datetime
 import openai
 import uuid
@@ -35,9 +68,6 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("house_agent")
-
-# Load environment variables
-load_dotenv(override = True)
 
 # Initialize LangSmith client only if enabled
 langsmith_client = None
@@ -59,12 +89,18 @@ print("Configured LangChain cache")
 class AgentResponse(BaseModel):
     """Structured format for agent responses"""
     messages: List[AIMessage] = Field(description="Messages to add to the conversation")
+    needs_clarification: bool = Field(default=False, description="Whether this response needs clarification")
+    original_request: Optional[str] = Field(default=None, description="The original unclear request that needs clarification")
+    clarification_count: int = Field(default=0, description="Number of times clarification has been requested")
 
 # Define state
 class AgentState(TypedDict):
     messages: Annotated[List[SystemMessage | HumanMessage | AIMessage | ToolMessage], add_messages]
     audio_server: Optional[Any] = None  # Reference to the audio server for tool events
     current_client: Optional[Any] = None  # Reference to the current websocket client
+    needs_clarification: bool = False  # Whether we're in a clarification dialogue
+    original_request: Optional[str] = None  # The original unclear request that needs clarification
+    clarification_count: int = 0  # Track how many times we've asked for clarification
 
 class EventEmittingToolNode(ToolNode):
     """Wrapper around ToolNode that emits tool events"""
@@ -196,11 +232,20 @@ def ensure_valid_tool_message(message):
         message.tool_call_id = str(uuid.uuid4())
     return message
 
+# Global variables to prevent multiple initializations
+_graph_initialized = False
+_cached_graph = None
+
 # Define your graph constructor as an async context manager
 @asynccontextmanager
 async def make_graph():
-    global current_music_info
-    global cached_system_message
+    global _graph_initialized, _cached_graph, current_music_info, cached_system_message
+    
+    # If we've already initialized, return the cached graph
+    if _graph_initialized and _cached_graph is not None:
+        print("Returning cached graph (already initialized)")
+        yield _cached_graph
+        return
     
     print("Starting agent initialization...")
     start_time = time.time()
@@ -230,7 +275,7 @@ async def make_graph():
         else:
             print("No HA_API_KEY found - Home Assistant connection will not be available")
         
-        # Initialize client with connections
+        print("Initializing MCP client with connections...")
         print(f"Initializing MCP client with {len(connections)} connections")
         client = MultiServerMCPClient(connections=connections)
         
@@ -246,8 +291,8 @@ async def make_graph():
         # Create Spotify client and tools
         spotify_tools = []
         try:
-            spotify_client = SpotifyClient()
-            spotify_tools = create_spotify_tools(spotify_client)
+            # Use lazy initialization - no need to create client here
+            spotify_tools = create_spotify_tools()
             print(f"Created {len(spotify_tools)} Spotify tools")
         except Exception as e:
             print(f"Warning: Could not initialize Spotify tools: {e}")
@@ -258,9 +303,6 @@ async def make_graph():
             print("Getting tools from MCP client...")
             mcp_tools = await client.get_tools()
             print(f"Loaded {len(mcp_tools)} tools from MCP client")
-            print("Tool types:")
-            for i, tool in enumerate(mcp_tools[:5]):  # Just log first 5 to avoid spam
-                print(f"{i+1}. {tool.name}: {type(tool).__name__}")
         except Exception as e:
             print(f"Error loading MCP tools: {e}")
             mcp_tools = []
@@ -318,32 +360,37 @@ async def make_graph():
         
         # Check current music state instead of hardcoding "Nothing playing"
         current_song = "Nothing playing"
+        # Only check music state if Spotify tools were successfully created
         if spotify_tools:
             try:
-                # Find the get_current_song tool and call it to get the actual current state
-                get_current_song_tool = None
-                for tool in spotify_tools:
-                    if hasattr(tool, 'name') and tool.name == 'get_current_song':
-                        get_current_song_tool = tool
-                        break
-                
-                if get_current_song_tool:
-                    print("Checking current music state on startup...")
-                    current_song = get_current_song_tool.func()
-                    print(f"Current music state: {current_song}")
-                else:
-                    print("Warning: get_current_song tool not found, using default state")
+                print("Checking current music state on startup...")
+                # Use the updated async function with lazy initialization
+                current_song = await get_current_song_startup_async()
+                print(f"Current music state: {current_song}")
             except Exception as e:
                 print(f"Warning: Could not check current music state on startup: {e}")
                 current_song = "Nothing playing"
         
         current_music_info["current_song"] = current_song
 
+        # Clear any cached system message to ensure new instructions are used
+        cached_system_message = None
+        
         # Create enhanced system message with date and custom instructions
         current_date = datetime.now().strftime("%B %d, %Y")
         enhanced_system_message = f"""You are a helpful AI assistant for a smart home. Today is {current_date}.
 
 Currently playing: {current_song}
+
+🚨 CRITICAL SPOTIFY TOOL REQUIREMENT 🚨
+When using the play_music tool, you MUST ALWAYS include a 'context' field:
+- Format: context: {{"type": "artist|track|album|genre", "market": "country_code"}}
+- Swedish content: market: "SE" 
+- English content: market: "IE"
+- NEVER call play_music without the context field - it will fail!
+
+Example for Swedish artist 'Bolaget':
+{{"context": {{"type": "artist", "market": "SE"}}, "query": "Bolaget"}}
 
 {homeassistant_content if homeassistant_content else ''}
 
@@ -358,15 +405,33 @@ Audio-Only Communication Guidelines:
 - If you need to list items, use natural speech patterns like "first," "second," or "also"
 - Remember the user cannot see anything - only hear your voice
 
+Handling Unclear Inputs:
+- If you're unsure about what the user wants, ask for clarification
+- For music requests, if you're not confident about the artist/song name, ask for confirmation
+- If a command seems ambiguous, ask the user to clarify their intent
+- When asking for clarification, be specific about what you're unsure about
+- If the user confirms your understanding, proceed with the action
+- If the user corrects you, use their correction to proceed
+- After 3 failed clarification attempts, gracefully end the conversation
+
 You have access to various tools to help control the home and get information. Use these tools when appropriate to help the user.
 
 Enhanced Music Control (Spotify Web API with Smart Playback):
 - Use get_current_song to check what's currently playing
-- Use play_music for intelligent music playback that supports:
-  * Specific tracks, artists, albums with automatic recommendations for continuous playback
-  * Genre queries (like "80s rock", "chill music", "workout songs") with randomized selection
-  * Album/playlist context playback for natural continuous listening
-  * Automatic creation of music queues based on similar songs
+- Use play_music for intelligent music playback that creates radio station experiences like Spotify mobile app:
+  * Artist requests: Creates 30-song radio stations with the artist + similar artists (like mobile app)
+  * Track requests: Creates 30-song radio stations starting with that track + similar songs
+  * Genre requests: Creates radio stations with 30 songs in that style/mood
+  * Album requests: Plays full albums for complete artist experiences
+  * Automatically detects language and sets appropriate market codes (Swedish->SE, Spanish->ES, German->DE, French->FR, etc.)
+  * CRITICAL: When calling play_music, you MUST provide the context parameter in this exact format:
+    context: {{"type": "genre|artist|track|album", "market": "country_code"}}
+    Examples:
+    - For Swedish artist: context: {{"type": "artist", "market": "SE"}}
+    - For Spanish music: context: {{"type": "genre", "market": "ES"}}
+    - For chill music: context: {{"type": "genre", "market": "IE"}}
+    - For specific album: context: {{"type": "album", "market": "SE"}}
+    The context field is MANDATORY - the tool will fail without it!
 - Use create_radio_station to create personalized radio stations from artists, tracks, or genres
 - Use pause_music, stop_music, next_track, previous_track for playback control
 - Use set_volume to adjust volume (0-100)
@@ -374,10 +439,34 @@ Enhanced Music Control (Spotify Web API with Smart Playback):
 - Use get_spotify_devices to see available playback devices
 
 Smart Music Playback Features:
-- When users ask for genres or styles, the system will find playlists or albums for better continuous playback
-- When playing individual tracks, the system automatically adds similar songs to create a radio-like experience
-- Genre queries get randomized to provide variety - you won't hear the same song every time
-- Context-aware playback means albums play in full, playlists continue naturally
+- CONTINUOUS PLAYBACK IS MANDATORY - never play just one song
+- Language detection automatically sets regional content (Swedish music uses SE market, Spanish uses ES, etc.)
+- Genre/style requests always create varied playlists with multiple artists
+- Individual song requests automatically add similar tracks for extended listening
+- Album requests play full albums for complete artist experiences
+- All music requests should result in 20+ minutes of continuous music
+
+Music Request Processing:
+1. ALWAYS detect language from the request text (Swedish, Spanish, English, etc.)
+2. Map language to Spotify market code (Swedish->SE, Spanish->ES, etc.)
+3. Determine context type: genre (for styles/moods), artist (for specific artists), track (for specific songs), album (for full albums)
+4. Call play_music with MANDATORY context field in exact format: {{"type": "...", "market": "..."}}
+5. Confirm what was started: "Playing [genre/artist] music with similar recommendations"
+
+Examples of proper context detection:
+- "Swedish music" -> context: {{"type": "genre", "market": "SE"}}
+- "Spanish rock" -> context: {{"type": "genre", "market": "ES"}}  
+- "ABBA songs" -> context: {{"type": "artist", "market": "SE"}}
+- "Despacito" -> context: {{"type": "track", "market": "ES"}}
+- "chill music" -> context: {{"type": "genre", "market": "IE"}}
+- "German pop" -> context: {{"type": "genre", "market": "DE"}}
+- "Miss Li latest album" -> context: {{"type": "album", "market": "SE"}}
+- "Spela Miss Lis senaste album" -> context: {{"type": "album", "market": "SE"}}
+
+CRITICAL: For Swedish artists (Miss Li, ABBA, Roxette, Robyn, etc.), ALWAYS use market "SE" and detect the correct type:
+- Album requests: "senaste album", "latest album", "new album" -> type: "album"
+- Artist requests: "Miss Li songs", "ABBA music" -> type: "artist"
+- When in doubt with Swedish artists, prefer "artist" type over "genre"
 
 When the user asks about music:
 1. Use play_music for most music requests - it now handles context and recommendations automatically
@@ -467,9 +556,31 @@ For all other requests:
                 else:
                     new_messages.append(AIMessage(content=str(response)))
             
+            # Check if we're in a clarification dialogue
+            needs_clarification = state.get("needs_clarification", False)
+            original_request = state.get("original_request")
+            clarification_count = state.get("clarification_count", 0)
+            
+            # If we're in a clarification dialogue, check the user's response
+            if needs_clarification and len(messages) > 1:
+                last_user_message = messages[-1]
+                if isinstance(last_user_message, HumanMessage):
+                    # If the user confirms or provides a correction
+                    if any(word in last_user_message.content.lower() for word in ["yes", "correct", "right", "that's right", "that's correct"]):
+                        # Reset clarification state and proceed
+                        needs_clarification = False
+                        original_request = None
+                        clarification_count = 0
+                    elif any(word in last_user_message.content.lower() for word in ["no", "wrong", "incorrect", "that's wrong", "that's incorrect"]):
+                        # Keep clarification state but increment counter
+                        clarification_count += 1
+            
             # Return structured response
             return AgentResponse(
-                messages=new_messages
+                messages=new_messages,
+                needs_clarification=needs_clarification,
+                original_request=original_request,
+                clarification_count=clarification_count
             ).model_dump()
         
         # Use trace decorator for the tools condition function
@@ -478,12 +589,43 @@ For all other requests:
             # Get the last message
             last_message = state["messages"][-1] if state["messages"] else None
             
+            # Check if we need clarification
+            if state.get("needs_clarification", False):
+                # If we've asked for clarification too many times, give up
+                if state.get("clarification_count", 0) >= 3:
+                    return "end"
+                return "clarification"
+            
             # Check if there are tool calls in the last message
             if last_message and isinstance(last_message, AIMessage) and hasattr(last_message, "tool_calls") and last_message.tool_calls:
                 return "tools"
                 
             # If no tool calls, move to the end
             return "end"
+
+        # Add clarification node
+        @traceable(name="Clarification", run_type="chain")
+        def handle_clarification(state: AgentState):
+            """Handle clarification requests by generating a question for the user."""
+            # Get the last message
+            last_message = state["messages"][-1] if state["messages"] else None
+            
+            if not last_message or not isinstance(last_message, HumanMessage):
+                return AgentResponse(
+                    messages=[AIMessage(content="I'm not sure what you're asking for. Could you please rephrase that?")],
+                    needs_clarification=True,
+                    clarification_count=state.get("clarification_count", 0) + 1
+                ).model_dump()
+            
+            # Generate a clarification question based on the user's input
+            clarification_question = f"I'm not sure I understood correctly. Did you mean to {last_message.content}? Please confirm or correct me."
+            
+            return AgentResponse(
+                messages=[AIMessage(content=clarification_question)],
+                needs_clarification=True,
+                original_request=last_message.content,
+                clarification_count=state.get("clarification_count", 0) + 1
+            ).model_dump()
         
         # Add conditional routing after tool execution
         @traceable(name="Post Tools Routing", run_type="chain")
@@ -525,15 +667,12 @@ For all other requests:
                         
                         # Music commands succeed if they return empty content or don't contain error indicators
                         if not content or not any(error_word in content.lower() for error_word in ["failed", "error", "no tracks found", "unauthorized", "not found"]):
-                            print(f"Music command '{tool_name}' succeeded (empty content), routing to silent_end")
                             return "silent_end"
                         else:
-                            print(f"Music command '{tool_name}' failed: {content}, routing to agent")
                             return "agent"
                     break
             
             # Default: continue to agent for all other cases
-            print("DEBUG: No music command detected, routing to agent")
             return "agent"
         
         # Add a silent end node for music commands
@@ -560,6 +699,7 @@ For all other requests:
         builder.add_node("agent", agent)
         builder.add_node("tools", tool_node)
         builder.add_node("silent_end", silent_end)
+        builder.add_node("clarification", handle_clarification)
         
         # Set the edge properties
         builder.add_edge(START, "agent")
@@ -570,6 +710,7 @@ For all other requests:
             should_continue,
             {
                 "tools": "tools",
+                "clarification": "clarification",
                 "end": END
             }
         )
@@ -583,6 +724,9 @@ For all other requests:
                 "silent_end": "silent_end"
             }
         )
+        
+        # Add edge from clarification back to agent
+        builder.add_edge("clarification", "agent")
         
         # Add edge from silent_end to END
         builder.add_edge("silent_end", END)
@@ -614,35 +758,57 @@ For all other requests:
                     print(f"Schema type: {type(turn_on_tool.args_schema).__name__}")
 
         # Perform a warm-up call to eagerly load the system message into cache
-        print("Performing warm-up call to load system prompt into cache...")
-        warmup_start_time = time.time()
+        # Skip warm-up when running under ASGI server to avoid blocking I/O from OpenAI retries
+        is_asgi_server = False
         try:
-            # Create a simple test message
-            warmup_messages = [
-                SystemMessage(content=cached_system_message),
-                HumanMessage(content="hello")
-            ]
+            # Check if we're in an ASGI context by looking for running loop and server markers
+            import sys
+            import inspect
             
-            # Make a non-streaming call to ensure it's fully loaded and cached
-            # Create a non-streaming version for the warmup
-            warmup_llm = ChatOpenAI(
-                streaming=False,
-                temperature=0,
-                model="gpt-4o-mini",
-                cache=True
-            ).bind_tools(all_tools)
+            # Check if uvicorn or langgraph server is in the process
+            is_asgi_server = (
+                any('uvicorn' in str(frame) or 'langgraph' in str(frame) 
+                    for frame in inspect.stack()) or
+                'uvicorn' in ' '.join(sys.argv) or
+                'langgraph' in ' '.join(sys.argv)
+            )
+        except:
+            pass
             
-            # Issue a warmup call
-            _ = warmup_llm.invoke(warmup_messages)
-            warmup_elapsed = time.time() - warmup_start_time
-            print(f"Warm-up call completed successfully in {warmup_elapsed:.2f} seconds - system prompt loaded into cache")
-        except Exception as e:
-            print(f"Warm-up call failed, but we'll continue anyway: {e}")
-            
+        if not is_asgi_server:
+            print("Performing warm-up call to load system prompt into cache...")
+            warmup_start_time = time.time()
+            try:
+                # Create a simple test message
+                warmup_messages = [
+                    SystemMessage(content=cached_system_message),
+                    HumanMessage(content="hello")
+                ]
+                
+                # Make a non-streaming call to ensure it's fully loaded and cached
+                # Create a non-streaming version for the warmup
+                warmup_llm = ChatOpenAI(
+                    streaming=False,
+                    temperature=0,
+                    model="gpt-4o-mini",
+                    cache=True
+                ).bind_tools(all_tools)
+                
+                # Issue a warmup call
+                _ = warmup_llm.invoke(warmup_messages)
+                warmup_elapsed = time.time() - warmup_start_time
+                print(f"Warm-up call completed successfully in {warmup_elapsed:.2f} seconds - system prompt loaded into cache")
+            except Exception as e:
+                print(f"Warm-up call failed, but we'll continue anyway: {e}")
+        else:
+            print("Skipping warm-up call (running under ASGI server)")
+
         total_init_time = time.time() - start_time
         print(f"Agent graph initialization completed in {total_init_time:.2f} seconds")
 
         # Yield the graph
+        _graph_initialized = True
+        _cached_graph = graph
         yield graph
     except Exception as e:
         print(f"Error during agent initialization: {e}")

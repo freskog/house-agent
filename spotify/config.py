@@ -15,7 +15,7 @@ class SpotifyConfig:
     redirect_uri: str
     spotifyd_device_name: str = "spotifyd"
     scopes: list = None
-    cache_path: str = ".spotify_cache"
+    cache_path: str = os.path.expanduser("~/.cache/spotify_agent_cache")
     
     def __post_init__(self):
         """Set default scopes if not provided."""

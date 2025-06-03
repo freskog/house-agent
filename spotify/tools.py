@@ -9,6 +9,8 @@ import json
 import logging
 import random
 import re
+import concurrent.futures
+import asyncio
 
 from .client import SpotifyClient
 
@@ -20,6 +22,17 @@ current_music_state = {
     "current_song": "Nothing playing",
     "last_updated": None
 }
+
+# Lazy initialization - don't create client until needed
+_spotify_client = None
+
+def _get_spotify_client():
+    """Get or create the Spotify client lazily."""
+    global _spotify_client
+    if _spotify_client is None:
+        from .client import SpotifyClient
+        _spotify_client = SpotifyClient()
+    return _spotify_client
 
 def update_music_state(new_state: str):
     """Update the global music state."""
@@ -38,8 +51,32 @@ def update_music_state(new_state: str):
 
 class PlayMusicInput(BaseModel):
     """Input schema for playing music."""
+    context: Optional[Dict[str, Any]] = Field(
+        None,
+        description="""REQUIRED context object with type and market. Must be provided for every call!
+        
+        Format: {"type": "album|artist|track|genre", "market": "country_code"}
+        
+        Examples:
+        - For Swedish artist: {"type": "artist", "market": "SE"}
+        - For Spanish song: {"type": "track", "market": "ES"}
+        - For genre/mood: {"type": "genre", "market": "IE"}
+        - For Swedish album: {"type": "album", "market": "SE"}
+        
+        Type guidelines:
+        - Use "genre" for style/mood requests (rock, pop, chill, etc.)
+        - Use "artist" for specific artists (ABBA, Miss Li, etc.)
+        - Use "track" for specific songs
+        - Use "album" for album requests
+        
+        Market codes: SE (Swedish), ES (Spanish), DE (German), FR (French), IE (Ireland/English)
+        
+        THIS FIELD IS MANDATORY - ALWAYS provide it!"""
+    )
     query: Optional[str] = Field(None, description="Search query for music to play (song, artist, album, genre)")
     uri: Optional[str] = Field(None, description="Specific Spotify URI to play")
+    market: Optional[str] = Field("IE", description="Market code for regional content (e.g., 'SE' for Sweden, 'ES' for Spain)")
+    create_playlist: Optional[bool] = Field(True, description="Whether to create a playlist from the results")
 
 class SetVolumeInput(BaseModel):
     """Input schema for setting volume."""
@@ -58,82 +95,413 @@ class CreateRadioInput(BaseModel):
     seed_genres: Optional[List[str]] = Field(None, description="List of genre names to use as seeds")
     limit: Optional[int] = Field(20, description="Number of tracks to include in radio station", ge=1, le=50)
 
-def _is_genre_or_style_query(query: str) -> bool:
-    """Check if a query is asking for a genre or musical style."""
-    genre_keywords = [
-        'rock', 'pop', 'jazz', 'blues', 'country', 'hip hop', 'rap', 'electronic', 
-        'classical', 'reggae', 'funk', 'soul', 'r&b', 'folk', 'metal', 'punk',
-        'indie', 'alternative', 'dance', 'house', 'techno', 'ambient', 'chill',
-        'soft', 'mellow', 'upbeat', 'relaxing', 'energetic', 'workout', 'party'
-    ]
-    
-    era_keywords = [
-        '60s', '70s', '80s', '90s', '2000s', 'sixties', 'seventies', 'eighties', 'nineties'
-    ]
-    
-    style_keywords = [
-        'ballad', 'anthem', 'instrumental', 'acoustic', 'live', 'remix'
-    ]
-    
-    query_lower = query.lower()
-    
-    # Check for genre/style/era keywords
-    for keyword in genre_keywords + era_keywords + style_keywords:
-        if keyword in query_lower:
-            return True
-    
-    # Check for patterns like "something music" or "something songs"
-    if re.search(r'\b(music|songs|tracks|playlist)\b', query_lower):
-        return True
-    
-    return False
-
-def _get_recommendations_from_track(spotify_client: SpotifyClient, track_uri: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """Get track recommendations based on a seed track."""
+# Global async function for startup use
+async def get_current_song_startup_async() -> str:
+    """Get information about the currently playing song for startup (async version)."""
     try:
-        # Extract track ID from URI
-        track_id = track_uri.split(':')[-1]
+        spotify_client = _get_spotify_client()
+        current = await spotify_client.get_current_playback_async()
+        if not current:
+            result = "No music is currently playing"
+            update_music_state(result)
+            return result
         
-        # Get audio features for the track to use as seeds
-        features = spotify_client._get_spotify_instance().audio_features([track_id])
-        if not features or not features[0]:
-            logger.warning(f"No audio features found for track {track_id}")
-            return []
+        # Check if there's a track loaded (even if paused)
+        if not current.get('item'):
+            result = "No music is currently playing"
+            update_music_state(result)
+            return result
+            
+        track = current['item']
+        artist = ', '.join([a['name'] for a in track['artists']])
+        song = track['name']
+        album = track['album']['name']
+        is_playing = current.get('is_playing', False)
         
-        audio_features = features[0]
-        
-        # Build recommendation parameters based on audio features
-        params = {
-            'seed_tracks': [track_id],
-            'limit': limit,
-            'target_valence': audio_features.get('valence', 0.5),
-            'target_energy': audio_features.get('energy', 0.5),
-            'target_danceability': audio_features.get('danceability', 0.5)
-        }
-        
-        # Get recommendations
-        recommendations = spotify_client._get_spotify_instance().recommendations(**params)
-        return recommendations.get('tracks', [])
+        result = f"Currently {'playing' if is_playing else 'paused'}: '{song}' by {artist} from '{album}'"
+        update_music_state(result)
+        return result
         
     except Exception as e:
-        logger.error(f"Error getting recommendations for track {track_uri}: {e}")
-        return []
+        logger.error(f"Error getting current song: {e}")
+        result = f"Error getting current song: {str(e)}"
+        update_music_state("No music is currently playing")
+        return result
 
-def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
+def create_spotify_tools() -> List[Tool]:
     """
-    Create LangChain tools for Spotify integration.
+    Create LangChain tools for Spotify integration with lazy client initialization.
     
-    Args:
-        spotify_client: Authenticated Spotify client
-        
     Returns:
         List of LangChain tools
     """
     
-    def get_current_song(*args, **kwargs) -> str:
-        """Get information about the currently playing song."""
+    # Helper functions that use lazy initialization
+    def _get_recommendations_from_track(track_uri: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get track recommendations based on a seed track."""
         try:
-            current = spotify_client.get_current_playback()
+            spotify_client = _get_spotify_client()
+            # Extract track ID from URI
+            track_id = track_uri.split(':')[-1]
+            
+            # Get audio features for the track to use as seeds
+            features = spotify_client._get_spotify_instance().audio_features([track_id])
+            if not features or not features[0]:
+                logger.warning(f"No audio features found for track {track_id}")
+                return []
+            
+            audio_features = features[0]
+            
+            # Build recommendation parameters based on audio features
+            params = {
+                'seed_tracks': [track_id],
+                'limit': limit,
+                'target_valence': audio_features.get('valence', 0.5),
+                'target_energy': audio_features.get('energy', 0.5),
+                'target_danceability': audio_features.get('danceability', 0.5)
+            }
+            
+            # Get recommendations
+            recommendations = spotify_client._get_spotify_instance().recommendations(**params)
+            return recommendations.get('tracks', [])
+            
+        except Exception as e:
+            logger.error(f"Error getting recommendations for track {track_uri}: {e}")
+            return []
+
+    def _get_query_context(query: str) -> Dict[str, Any]:
+        """Get context information about the query.
+        This provides basic fallback context detection if the LLM doesn't provide context."""
+        query_lower = query.lower()
+        
+        # Language/market detection
+        market = "IE"  # Default to Ireland
+        if any(word in query_lower for word in ["swedish", "sverige", "sweden", "miss li", "robyn", "roxette", "abba", "ace of base"]):
+            market = "SE"
+        elif any(word in query_lower for word in ["spanish", "español", "spain", "españa"]):
+            market = "ES"
+        elif any(word in query_lower for word in ["german", "deutsch", "germany", "deutschland"]):
+            market = "DE"
+        elif any(word in query_lower for word in ["french", "français", "france"]):
+            market = "FR"
+        elif any(word in query_lower for word in ["italian", "italiano", "italy", "italia"]):
+            market = "IT"
+        elif any(word in query_lower for word in ["norwegian", "norsk", "norway", "norge"]):
+            market = "NO"
+        elif any(word in query_lower for word in ["danish", "dansk", "denmark", "danmark"]):
+            market = "DK"
+        
+        # Context type detection - prioritize specific requests
+        context_type = "genre"  # Default to genre for better variety
+        
+        # Check for album indicators first (most specific)
+        if any(word in query_lower for word in ["album", "full album", "entire album", "latest album", "new album", "senaste album"]):
+            context_type = "album"
+        # Check for specific artist indicators
+        elif any(word in query_lower for word in ["by ", "from ", "artist"]):
+            context_type = "artist"
+        # Check for specific track indicators
+        elif any(word in query_lower for word in ["song", "track", "play the song"]):
+            context_type = "track"
+        # Check for playlist indicators
+        elif any(word in query_lower for word in ["playlist"]):
+            context_type = "playlist"
+        # If we have a specific artist name, treat as artist search
+        elif any(artist in query_lower for artist in ["miss li", "robyn", "roxette", "abba", "ace of base"]):
+            context_type = "artist"
+        # Keep genre as default for style/mood requests
+        
+        return {
+            "type": context_type,
+            "market": market
+        }
+
+    def _create_playlist_from_tracks(tracks: List[Dict[str, Any]], name: str, description: str) -> Optional[str]:
+        """Create a playlist from a list of tracks."""
+        try:
+            spotify = _get_spotify_client()._get_spotify_instance()
+            if not spotify:
+                return None
+                
+            # Get current user
+            user = spotify.current_user()
+            if not user:
+                return None
+                
+            # Create playlist
+            playlist = spotify.user_playlist_create(
+                user=user['id'],
+                name=name,
+                description=description,
+                public=False
+            )
+            
+            if not playlist:
+                return None
+                
+            # Add tracks to playlist
+            track_uris = [track['uri'] for track in tracks]
+            spotify.playlist_add_items(playlist['id'], track_uris)
+            
+            return playlist['uri']
+        except Exception as e:
+            logger.error(f"Error creating playlist: {e}")
+            return None
+
+    def _play_track_with_recommendations(track_uri: str, create_playlist: bool = True) -> tuple[bool, str]:
+        """Play a track with recommendations."""
+        recommendations = _get_recommendations_from_track(track_uri, 29)  # Get 29 recommendations + 1 original = 30 total
+        if not recommendations:
+            return _get_spotify_client().play(uri=track_uri), ""
+
+        if create_playlist:
+            playlist_uri = _create_playlist_from_tracks(
+                [{"uri": track_uri}] + recommendations,
+                "Recommended Tracks",
+                "Playlist created from your selected track and similar recommendations"
+            )
+            if playlist_uri:
+                return _get_spotify_client().play(context_uri=playlist_uri), ""
+        
+        track_uris = [track_uri] + [track['uri'] for track in recommendations]
+        return _get_spotify_client().play_tracks(track_uris), ""
+
+    def _play_search_results(results: Dict[str, Any], context: Dict[str, Any], create_playlist: bool = True) -> tuple[bool, str]:
+        """Play music from search results based on context, using radio station approach like mobile app."""
+        query_type = context.get("type", "genre")
+        
+        # For artist requests - create radio station like mobile app
+        if query_type == "artist":
+            artists = results.get('artists', {}).get('items', [])
+            if artists:
+                artist = artists[0]
+                # Use create_radio_station function for true radio experience
+                try:
+                    radio_result = create_radio_station(seed_artists=[artist['name']], limit=30)
+                    if not radio_result:  # Empty result means success
+                        return True, f"Playing radio station based on {artist['name']} (30 songs with similar artists)"
+                    else:
+                        # Fallback to top tracks if radio creation fails
+                        top_tracks = _get_spotify_client()._get_spotify_instance().artist_top_tracks(artist['id'], country=context.get("market", "IE"))
+                        if top_tracks and top_tracks.get('tracks'):
+                            track_uris = [track['uri'] for track in top_tracks['tracks'][:20]]
+                            success = _get_spotify_client().play_tracks(track_uris)
+                            if success:
+                                return True, f"Playing top songs by {artist['name']} (20 tracks)"
+                except Exception as e:
+                    logger.error(f"Radio station creation failed for artist {artist['name']}: {e}")
+                    # Fallback to current method
+                    pass
+        
+        # For genre requests - create radio station with genre seeds
+        if query_type == "genre":
+            # Extract genre from query for radio station
+            query_text = results.get('_query', '')  # We'll pass this in the search
+            if query_text:
+                try:
+                    # Try to create a genre-based radio station
+                    radio_result = create_radio_station(seed_genres=[query_text], limit=30)
+                    if not radio_result:  # Empty result means success
+                        return True, f"Playing {query_text} radio station (30 songs)"
+                except Exception as e:
+                    logger.error(f"Genre radio station failed for {query_text}: {e}")
+            
+            # Fallback to current genre handling with multiple sources
+            all_tracks = []
+            
+            # Get tracks from search results
+            tracks = results.get('tracks', {}).get('items', [])
+            if tracks:
+                all_tracks.extend(tracks[:10])  # Take top 10 tracks
+            
+            # Get tracks from albums
+            albums = results.get('albums', {}).get('items', [])
+            for album in albums[:3]:  # Take a few tracks from top albums
+                album_tracks = _get_spotify_client()._get_spotify_instance().album_tracks(album['id'], limit=5)
+                if album_tracks and album_tracks.get('items'):
+                    all_tracks.extend(album_tracks['items'][:3])  # Take 3 tracks per album
+            
+            # Get tracks from artists
+            artists = results.get('artists', {}).get('items', [])
+            for artist in artists[:3]:  # Take tracks from top artists
+                top_tracks = _get_spotify_client()._get_spotify_instance().artist_top_tracks(artist['id'], country=context.get("market", "IE"))
+                if top_tracks and top_tracks.get('tracks'):
+                    all_tracks.extend(top_tracks['tracks'][:3])  # Take 3 tracks per artist
+            
+            # If we have tracks, create a varied playlist
+            if all_tracks:
+                # Shuffle for variety and limit to reasonable size
+                random.shuffle(all_tracks)
+                selected_tracks = all_tracks[:25]  # More tracks for radio-like experience
+                
+                if create_playlist:
+                    playlist_uri = _create_playlist_from_tracks(
+                        selected_tracks,
+                        f"{query_text.title()} Mix" if query_text else "Genre Mix",
+                        f"Radio-style playlist for {query_text}" if query_text else "Mixed playlist for your music request"
+                    )
+                    if playlist_uri:
+                        success = _get_spotify_client().play(context_uri=playlist_uri)
+                        if success:
+                            return True, f"Playing {query_text} mix with {len(selected_tracks)} songs"
+                
+                # Fallback to track list if playlist creation fails
+                track_uris = [track['uri'] for track in selected_tracks if track.get('uri')]
+                if track_uris:
+                    success = _get_spotify_client().play_tracks(track_uris)
+                    if success:
+                        return True, f"Playing {len(track_uris)} songs for your request"
+        
+        # For track requests - create radio station based on that track
+        if query_type == "track":
+            tracks = results.get('tracks', {}).get('items', [])
+            if tracks:
+                track = tracks[0]
+                # Try to create radio station based on this track
+                try:
+                    radio_result = create_radio_station(seed_tracks=[track['name']], limit=30)
+                    if not radio_result:  # Empty result means success
+                        artist = ', '.join([a['name'] for a in track['artists']])
+                        return True, f"Playing radio station starting with '{track['name']}' by {artist} (30 similar songs)"
+                except Exception as e:
+                    logger.error(f"Track radio station failed: {e}")
+                
+                # Fallback to track with recommendations
+                success, _ = _play_track_with_recommendations(track['uri'], create_playlist)
+                if success:
+                    artist = ', '.join([a['name'] for a in track['artists']])
+                    return True, f"Playing: '{track['name']}' by {artist} (with similar songs)"
+        
+        # Try playlists first if that's what was requested
+        if query_type == "playlist":
+            playlists = results.get('playlists', {}).get('items', [])
+            if playlists:
+                playlist = playlists[0]
+                success = _get_spotify_client().play(context_uri=playlist['uri'])
+                if success:
+                    return True, f"Playing playlist: '{playlist['name']}' by {playlist['owner']['display_name']}"
+        
+        # Try albums (full album context - keep this as is since albums should play fully)
+        albums = results.get('albums', {}).get('items', [])
+        if albums:
+            album = albums[0]
+            success = _get_spotify_client().play(context_uri=album['uri'])
+            if success:
+                artist = ', '.join([a['name'] for a in album['artists']])
+                return True, f"Playing album: '{album['name']}' by {artist}"
+        
+        # Final fallback - try any tracks available
+        tracks = results.get('tracks', {}).get('items', [])
+        if tracks:
+            track = tracks[0]
+            success, _ = _play_track_with_recommendations(track['uri'], create_playlist)
+            if success:
+                artist = ', '.join([a['name'] for a in track['artists']])
+                return True, f"Playing: '{track['name']}' by {artist} (with similar songs)"
+        
+        # Final fallback - try any artists available
+        artists = results.get('artists', {}).get('items', [])
+        if artists:
+            artist = artists[0]
+            top_tracks = _get_spotify_client()._get_spotify_instance().artist_top_tracks(artist['id'], country=context.get("market", "IE"))
+            if top_tracks and top_tracks.get('tracks'):
+                track_uris = [track['uri'] for track in top_tracks['tracks'][:20]]
+                success = _get_spotify_client().play_tracks(track_uris)
+                if success:
+                    return True, f"Playing top songs by {artist['name']}"
+        
+        return False, ""
+
+    def play_music(context: Dict[str, Any] = None, query: Optional[str] = None, uri: Optional[str] = None, market: str = "IE", create_playlist: bool = True) -> str:
+        """Play music by search query or specific URI with smart context selection."""
+        try:
+            # Critical validation - provide immediate feedback for missing context
+            if context is None or not isinstance(context, dict) or 'type' not in context or 'market' not in context:
+                # Return a structured error that LangChain/LangGraph will pass back to the AI
+                error_msg = """VALIDATION ERROR: Missing required 'context' field.
+
+The play_music tool requires a context parameter in this exact format:
+{"context": {"type": "artist|track|album|genre", "market": "country_code"}}
+
+For Swedish artist 'Bolaget', the correct call is:
+{"context": {"type": "artist", "market": "SE"}, "query": "Bolaget"}
+
+Please retry with the correct context parameter."""
+                
+                return error_msg
+            
+            if uri:
+                # Play specific URI
+                if uri.startswith('spotify:track:'):
+                    success, _ = _play_track_with_recommendations(uri, create_playlist)
+                else:
+                    success = _get_spotify_client().play(context_uri=uri)
+                
+                if success:
+                    update_music_state("Music is playing")
+                    return ""
+                return "Failed to start music playback"
+                
+            elif query:
+                # Context is now required from the LLM, but provide fallback just in case
+                if not context or not isinstance(context, dict):
+                    print(f"WARNING: Invalid context provided for query '{query}': {context}, using fallback detection")
+                    context = _get_query_context(query)
+                
+                # Search based on provided context
+                search_types = []
+                query_type = context.get("type", "genre")
+                
+                if query_type == "genre":
+                    # For genre searches, search across all types for variety
+                    search_types = ["track", "album", "artist", "playlist"]
+                elif query_type == "artist":
+                    search_types = ["artist", "track", "album"]
+                elif query_type == "album":
+                    search_types = ["album", "track"]
+                elif query_type == "track":
+                    search_types = ["track", "artist"]
+                elif query_type == "playlist":
+                    search_types = ["playlist", "track"]
+                else:
+                    # Default fallback
+                    search_types = ["track", "album", "artist"]
+                
+                print(f"Playing music with context: {context}, search_types: {search_types}")
+                
+                results = _get_spotify_client().search(
+                    query, 
+                    types=search_types, 
+                    limit=20, 
+                    market=context.get("market", market)
+                )
+                
+                # Add query text to results for genre radio station creation
+                results['_query'] = query
+                
+                success, state = _play_search_results(results, context, create_playlist)
+                if success:
+                    update_music_state(state)
+                    return ""
+                return f"No tracks found for query: {query}"
+                
+            else:
+                # Resume playback
+                success = _get_spotify_client().play()
+                if success:
+                    update_music_state("Music resumed")
+                    return ""
+                return "Failed to resume music playback"
+                
+        except Exception as e:
+            logger.error(f"Error playing music: {e}")
+            return f"Error playing music: {str(e)}"
+
+    # Tool functions
+    async def get_current_song_async(*args, **kwargs) -> str:
+        """Get information about the currently playing song (async version)."""
+        try:
+            current = _get_spotify_client().get_current_playback_async()
             if not current:
                 result = "No music is currently playing"
                 update_music_state(result)
@@ -161,159 +529,44 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
             update_music_state("No music is currently playing")
             return result
             
-    def play_music(query: Optional[str] = None, uri: Optional[str] = None) -> str:
-        """Play music by search query or specific URI with smart context selection."""
+    def get_current_song(*args, **kwargs) -> str:
+        """Get information about the currently playing song."""
         try:
-            if uri:
-                # Play specific URI - check if it's a track or context
-                if uri.startswith('spotify:track:'):
-                    # For individual tracks, try to get recommendations to create a better experience
-                    recommendations = _get_recommendations_from_track(spotify_client, uri, 49)
-                    if recommendations:
-                        # Create a playlist with the original track + recommendations
-                        track_uris = [uri] + [track['uri'] for track in recommendations]
-                        success = spotify_client.play_tracks(track_uris)
-                    else:
-                        # Fall back to playing just the track
-                        success = spotify_client.play(uri=uri)
-                else:
-                    # It's a context URI (album, playlist, artist) - play directly
-                    success = spotify_client.play(context_uri=uri)
-                
-                if success:
-                    update_music_state("Music is playing")
-                    return ""
-                else:
-                    return "Failed to start music playback"
-                
-            elif query:
-                # Determine if this is a genre/style query or specific track/artist search
-                is_genre_query = _is_genre_or_style_query(query)
-                
-                if is_genre_query:
-                    # For genre queries, search for playlists first for better continuous playback
-                    results = spotify_client.search(query, types=['playlist', 'album'], limit=10)
-                    
-                    # Try playlists first
-                    playlists = results.get('playlists', {}).get('items', [])
-                    if playlists:
-                        # Randomize playlist selection
-                        playlist = random.choice(playlists)
-                        playlist_uri = playlist['uri']
-                        
-                        success = spotify_client.play(context_uri=playlist_uri)
-                        if success:
-                            state = f"Playing playlist: '{playlist['name']}' by {playlist['owner']['display_name']}"
-                            update_music_state(state)
-                            return ""
-                    
-                    # If no playlists, try albums
-                    albums = results.get('albums', {}).get('items', [])
-                    if albums:
-                        album = random.choice(albums)
-                        album_uri = album['uri']
-                        
-                        success = spotify_client.play(context_uri=album_uri)
-                        if success:
-                            artist = ', '.join([a['name'] for a in album['artists']])
-                            state = f"Playing album: '{album['name']}' by {artist}"
-                            update_music_state(state)
-                            return ""
-                    
-                    # Fall back to track search with recommendations
-                    track_results = spotify_client.search(query, types=['track'], limit=20)
-                    tracks = track_results.get('tracks', {}).get('items', [])
-                    if tracks:
-                        # Randomize track selection
-                        selected_track = random.choice(tracks)
-                        track_uri = selected_track['uri']
-                        
-                        # Get recommendations based on this track
-                        recommendations = _get_recommendations_from_track(spotify_client, track_uri, 49)
-                        if recommendations:
-                            track_uris = [track_uri] + [track['uri'] for track in recommendations]
-                            success = spotify_client.play_tracks(track_uris)
-                        else:
-                            success = spotify_client.play(uri=track_uri)
-                        
-                        if success:
-                            artist = ', '.join([a['name'] for a in selected_track['artists']])
-                            state = f"Playing {query} starting with: '{selected_track['name']}' by {artist}"
-                            update_music_state(state)
-                            return ""
-                    
-                    return f"No music found for: {query}"
-                    
-                else:
-                    # Specific track/artist search - search tracks first, then try albums/artists
-                    results = spotify_client.search(query, types=['track', 'album', 'artist'], limit=5)
-                    
-                    # Try tracks first
-                    tracks = results.get('tracks', {}).get('items', [])
-                    if tracks:
-                        # For specific searches, use the first result but get recommendations
-                        track = tracks[0]
-                        track_uri = track['uri']
-                        
-                        # Get recommendations for continuous playback
-                        recommendations = _get_recommendations_from_track(spotify_client, track_uri, 49)
-                        if recommendations:
-                            track_uris = [track_uri] + [track['uri'] for track in recommendations]
-                            success = spotify_client.play_tracks(track_uris)
-                        else:
-                            success = spotify_client.play(uri=track_uri)
-                        
-                        if success:
-                            artist = ', '.join([a['name'] for a in track['artists']])
-                            state = f"Playing: '{track['name']}' by {artist} (with similar songs)"
-                            update_music_state(state)
-                            return ""
-                    
-                    # Try albums
-                    albums = results.get('albums', {}).get('items', [])
-                    if albums:
-                        album = albums[0]  # Use first result for specific searches
-                        album_uri = album['uri']
-                        
-                        success = spotify_client.play(context_uri=album_uri)
-                        if success:
-                            artist = ', '.join([a['name'] for a in album['artists']])
-                            state = f"Playing album: '{album['name']}' by {artist}"
-                            update_music_state(state)
-                            return ""
-                    
-                    # Try artists
-                    artists = results.get('artists', {}).get('items', [])
-                    if artists:
-                        artist = artists[0]
-                        # Get artist's top tracks for playback
-                        top_tracks = spotify_client._get_spotify_instance().artist_top_tracks(artist['id'])
-                        if top_tracks and top_tracks.get('tracks'):
-                            track_uris = [track['uri'] for track in top_tracks['tracks'][:20]]
-                            success = spotify_client.play_tracks(track_uris)
-                            if success:
-                                state = f"Playing top songs by {artist['name']}"
-                                update_music_state(state)
-                                return ""
-                    
-                    return f"No tracks found for query: {query}"
-            else:
-                # Resume playback
-                success = spotify_client.play()
-                if success:
-                    update_music_state("Music resumed")
-                    return ""
-                else:
-                    return "Failed to resume music playback"
-                
-        except Exception as e:
-            logger.error(f"Error playing music: {e}")
-            return f"Error playing music: {str(e)}"
+            # LangChain tools must be synchronous - there's no way around this
+            # The blocking I/O warnings from ASGI servers are due to spotipy's OAuth file operations
+            # which we can't easily make async without rewriting the entire library
+            current = _get_spotify_client().get_current_playback()
+            if not current:
+                result = "No music is currently playing"
+                update_music_state(result)
+                return result
             
+            # Check if there's a track loaded (even if paused)
+            if not current.get('item'):
+                result = "No music is currently playing"
+                update_music_state(result)
+                return result
+                
+            track = current['item']
+            artist = ', '.join([a['name'] for a in track['artists']])
+            song = track['name']
+            album = track['album']['name']
+            is_playing = current.get('is_playing', False)
+            
+            result = f"Currently {'playing' if is_playing else 'paused'}: '{song}' by {artist} from '{album}'"
+            update_music_state(result)
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error getting current song: {e}")
+            result = f"Error getting current song: {str(e)}"
+            update_music_state("No music is currently playing")
+            return result
+    
     def pause_music(*args, **kwargs) -> str:
         """Pause the currently playing music."""
         try:
-            success = spotify_client.pause()
+            success = _get_spotify_client().pause()
             if success:
                 update_music_state("Music paused")
                 return ""  # Return empty string for silent operation
@@ -327,7 +580,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         """Stop the currently playing music."""
         try:
             # Try to pause the music directly - spotipy will handle token refresh automatically
-            success = spotify_client.pause()
+            success = _get_spotify_client().pause()
             if success:
                 update_music_state("Music stopped")
                 return ""  # Return empty string for silent operation
@@ -340,7 +593,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     def next_track(*args, **kwargs) -> str:
         """Skip to the next track."""
         try:
-            success = spotify_client.next_track()
+            success = _get_spotify_client().next_track()
             return "" if success else "Failed to skip to next track"  # Silent on success
         except Exception as e:
             logger.error(f"Error skipping track: {e}")
@@ -349,7 +602,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     def previous_track(*args, **kwargs) -> str:
         """Go back to the previous track."""
         try:
-            success = spotify_client.previous_track()
+            success = _get_spotify_client().previous_track()
             return "" if success else "Failed to go to previous track"  # Silent on success
         except Exception as e:
             logger.error(f"Error going to previous track: {e}")
@@ -358,7 +611,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     def set_volume(volume: int) -> str:
         """Set the music volume (0-100)."""
         try:
-            success = spotify_client.set_volume(volume)
+            success = _get_spotify_client().set_volume(volume)
             return "" if success else "Failed to set volume"  # Silent on success
         except Exception as e:
             logger.error(f"Error setting volume: {e}")
@@ -369,7 +622,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         try:
             search_types = types or ['track']
             
-            results = spotify_client.search(query, types=search_types, limit=limit)
+            results = _get_spotify_client().search(query, types=search_types, limit=limit)
             
             output = []
             for search_type in search_types:
@@ -397,7 +650,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     def get_devices(*args, **kwargs) -> str:
         """Get available Spotify devices."""
         try:
-            devices = spotify_client.get_devices()
+            devices = _get_spotify_client().get_devices()
             if not devices:
                 return "No Spotify devices found"
                 
@@ -419,7 +672,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     ) -> str:
         """Create a radio station based on seed artists, tracks, or genres."""
         try:
-            spotify = spotify_client._get_spotify_instance()
+            spotify = _get_spotify_client()._get_spotify_instance()
             if not spotify:
                 return "Failed to connect to Spotify"
             
@@ -459,7 +712,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
                 
             # Play the recommended tracks
             track_uris = [track['uri'] for track in recommendations['tracks']]
-            success = spotify_client.play_tracks(track_uris)
+            success = _get_spotify_client().play_tracks(track_uris)
             
             if success:
                 seed_info = []
@@ -490,7 +743,25 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
         ),
         StructuredTool(
             name="play_music", 
-            description="Play music by search query with smart context selection. Supports specific tracks, artists, albums, genres, and musical styles. Automatically creates continuous playback experience.",
+            description="""Play music with radio station experience like Spotify mobile app. 
+
+            🚨 VALIDATION ENFORCED: This tool validates the 'context' field and will return an error with instructions if missing! 🚨
+            
+            The context field must be provided as:
+            {"context": {"type": "artist|track|album|genre", "market": "country_code"}}
+            
+            Radio Station Behavior (like mobile app):
+            - Artist requests: Creates 30-song radio station based on the artist + similar artists
+            - Track requests: Creates 30-song radio station starting with that track + similar songs  
+            - Genre requests: Creates radio station with 30 songs in that genre/style
+            - Album requests: Plays the full album (traditional album experience)
+            
+            Examples of CORRECT calls:
+            - Swedish artist: {"context": {"type": "artist", "market": "SE"}, "query": "ABBA"}
+            - Spanish song: {"context": {"type": "track", "market": "ES"}, "query": "Despacito"}
+            - Genre request: {"context": {"type": "genre", "market": "IE"}, "query": "rock"}
+            
+            If you call without context, you will receive a detailed error message with instructions.""",
             func=play_music,
             args_schema=PlayMusicInput
         ),

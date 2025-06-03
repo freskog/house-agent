@@ -8,6 +8,7 @@ from spotipy.oauth2 import SpotifyOAuth
 from typing import Optional
 import logging
 from urllib.parse import urlparse, parse_qs
+import asyncio
 
 from .config import SpotifyConfig
 
@@ -42,6 +43,60 @@ class SpotifyAuthManager:
             str: Authorization URL
         """
         return self.auth_manager.get_authorize_url()
+        
+    async def get_access_token_async(self, authorization_response_url: Optional[str] = None) -> Optional[str]:
+        """
+        Get access token from cached token or authorization response (async version).
+        
+        Args:
+            authorization_response_url: The full URL that Spotify redirected to
+            
+        Returns:
+            str: Access token if available, None otherwise
+        """
+        try:
+            if authorization_response_url:
+                # Extract authorization code from response URL and get token
+                parsed_url = urlparse(authorization_response_url)
+                params = parse_qs(parsed_url.query)
+                
+                if 'code' in params:
+                    # Use the working method: pass just the code
+                    auth_code = params['code'][0]
+                    token_info = await asyncio.to_thread(
+                        self.auth_manager.get_access_token, 
+                        code=auth_code, 
+                        as_dict=True
+                    )
+                else:
+                    # Fallback to original method
+                    token_info = await asyncio.to_thread(
+                        self.auth_manager.get_access_token, 
+                        authorization_response_url, 
+                        as_dict=True
+                    )
+            else:
+                # Try to get cached token or refresh if needed
+                token_info = await asyncio.to_thread(self.auth_manager.get_cached_token)
+                
+                # If no cached token, we need user authorization
+                if not token_info:
+                    logger.warning("No cached token found. User authorization required.")
+                    return None
+                    
+                # If token is expired, try to refresh
+                if self.auth_manager.is_token_expired(token_info):
+                    logger.info("Token expired, attempting refresh...")
+                    token_info = await asyncio.to_thread(
+                        self.auth_manager.refresh_access_token, 
+                        token_info['refresh_token']
+                    )
+                    
+            return token_info['access_token'] if token_info else None
+            
+        except Exception as e:
+            logger.error(f"Error getting access token: {e}")
+            return None
         
     def get_access_token(self, authorization_response_url: Optional[str] = None) -> Optional[str]:
         """
@@ -85,6 +140,16 @@ class SpotifyAuthManager:
         except Exception as e:
             logger.error(f"Error getting access token: {e}")
             return None
+    
+    async def is_authenticated_async(self) -> bool:
+        """
+        Check if we have a valid access token (async version).
+        
+        Returns:
+            bool: True if authenticated, False otherwise
+        """
+        token = await self.get_access_token_async()
+        return token is not None
             
     def is_authenticated(self) -> bool:
         """
@@ -95,6 +160,15 @@ class SpotifyAuthManager:
         """
         token = self.get_access_token()
         return token is not None
+        
+    async def clear_cache_async(self):
+        """Clear the token cache file (async version)."""
+        try:
+            if await asyncio.to_thread(os.path.exists, self.config.cache_path):
+                await asyncio.to_thread(os.remove, self.config.cache_path)
+                logger.info("Token cache cleared")
+        except Exception as e:
+            logger.error(f"Error clearing cache: {e}")
         
     def clear_cache(self):
         """Clear the token cache file."""
