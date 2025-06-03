@@ -240,7 +240,11 @@ class AgentInterface:
             self.client_conversation_history[current_client] = self.client_conversation_history[current_client][-4:]
             
         # Create input state with the conversation history
-        input_state = AgentState(messages=self.client_conversation_history[current_client])
+        input_state = AgentState(
+            messages=self.client_conversation_history[current_client],
+            audio_server=self.audio_server,
+            current_client=current_client
+        )
         
         # Process the input and get response - measure response time
         start_time = time.time()
@@ -629,18 +633,24 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="auto", help="Language for transcription")
     parser.add_argument("--use-coreml", action="store_true", help="Use CoreML on Apple Silicon")
     parser.add_argument("--save-recordings", action="store_true", help="Save recordings")
+    parser.add_argument("--use-langsmith", action="store_true", help="Enable LangSmith tracing (disabled by default)")
     parser.add_argument("--langsmith-api-key", type=str, help="LangSmith API key for tracing (starts with 'ls-')")
     parser.add_argument("--langsmith-project", type=str, help="LangSmith project for organizing traces")
     args = parser.parse_args()
     
     # Process the command line API key if provided
-    if args.langsmith_api_key:
-        os.environ["LANGSMITH_API_KEY"] = args.langsmith_api_key
-        os.environ["LANGCHAIN_API_KEY"] = args.langsmith_api_key  # For compatibility
-        
-    if args.langsmith_project:
-        os.environ["LANGSMITH_PROJECT"] = args.langsmith_project
-        os.environ["LANGCHAIN_PROJECT"] = args.langsmith_project  # For compatibility
+    if args.use_langsmith:
+        if args.langsmith_api_key:
+            os.environ["LANGSMITH_API_KEY"] = args.langsmith_api_key
+            os.environ["LANGCHAIN_API_KEY"] = args.langsmith_api_key  # For compatibility
+            
+        if args.langsmith_project:
+            os.environ["LANGSMITH_PROJECT"] = args.langsmith_project
+            os.environ["LANGCHAIN_PROJECT"] = args.langsmith_project  # For compatibility
+    else:
+        # Disable LangSmith if not explicitly enabled
+        os.environ["LANGSMITH_TRACING_V2"] = "false"
+        os.environ["LANGCHAIN_TRACING_V2"] = "false"
     
     try:
         print("Starting Audio Agent with optimized latency settings...")

@@ -23,15 +23,14 @@ class SpotifyClient:
         """
         self.config = config or get_spotify_config()
         self.auth_manager = SpotifyAuthManager(self.config)
+        # Use the modern oauth_manager approach for automatic token refresh
         self._spotify: Optional[spotipy.Spotify] = None
         
     def _get_spotify_instance(self) -> Optional[spotipy.Spotify]:
-        """Get authenticated Spotify instance."""
+        """Get authenticated Spotify instance with automatic token refresh."""
         if not self._spotify:
-            token = self.auth_manager.get_access_token()
-            if not token:
-                return None
-            self._spotify = spotipy.Spotify(auth=token)
+            # Use the SpotifyOAuth instance from auth_manager for automatic token refresh
+            self._spotify = spotipy.Spotify(oauth_manager=self.auth_manager.auth_manager)
         return self._spotify
         
     def authenticate(self, authorization_response_url: Optional[str] = None) -> bool:
@@ -47,7 +46,8 @@ class SpotifyClient:
         if authorization_response_url:
             token = self.auth_manager.get_access_token(authorization_response_url)
             if token:
-                self._spotify = spotipy.Spotify(auth=token)
+                # Reset the spotify instance so it gets recreated with fresh auth
+                self._spotify = None
                 return True
         return self.auth_manager.is_authenticated()
         

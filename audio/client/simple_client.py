@@ -30,6 +30,8 @@ class SimpleAudioClient:
         self.running = False
         self.hanging_up = False  # Track when we're in the process of hanging up
         self.sequence = 0  # Counter for message sequencing
+        self.tool_active = False  # Track if a tool is currently active
+        self.current_tool = None  # Track the currently active tool
         
         # Audio configuration
         self.channels = 1  # Mono
@@ -357,6 +359,39 @@ class SimpleAudioClient:
                     elif msg["type"] == "error":
                         error = msg["payload"].get("error", "Unknown error")
                         print(f"❌ Error: {error}")
+                        
+                    # Handle tool events
+                    elif msg["type"] == "tool_event":
+                        event_type = msg["payload"].get("event_type")
+                        tool_name = msg["payload"].get("tool_name")
+                        details = msg["payload"].get("details")
+                        
+                        if event_type == "tool_start":
+                            self.tool_active = True
+                            self.current_tool = tool_name
+                            print(f"🔧 Tool started: {tool_name}")
+                            # TODO: Start blinking LEDs here
+                            
+                        elif event_type == "tool_end":
+                            if tool_name == self.current_tool:
+                                self.tool_active = False
+                                self.current_tool = None
+                                print(f"✅ Tool completed: {tool_name}")
+                                # TODO: Stop blinking LEDs here if no other tools are active
+                                
+                        elif event_type == "tool_error":
+                            error_msg = details.get("error") if details else "Unknown error"
+                            print(f"❌ Tool error in {tool_name}: {error_msg}")
+                            if tool_name == self.current_tool:
+                                self.tool_active = False
+                                self.current_tool = None
+                                # TODO: Show error pattern on LEDs
+                                
+                        # Reset LED state when transcription starts
+                        if msg["type"] == "status" and msg["payload"].get("state") == "transcribing":
+                            self.tool_active = False
+                            self.current_tool = None
+                            # TODO: Reset LEDs to idle state
                 
                 except json.JSONDecodeError:
                     print(f"Invalid JSON message")

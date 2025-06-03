@@ -28,8 +28,8 @@ from langsmith import traceable
 try:
     from langsmith import Client
     # Don't initialize at module level - we'll create clients on demand
-    has_langsmith = True
-    print(f"LangSmith module imported successfully")
+    has_langsmith = os.environ.get("LANGSMITH_TRACING_V2", "false").lower() == "true"
+    print(f"LangSmith module imported successfully, tracing enabled: {has_langsmith}")
 except ImportError:
     # Fallback if langsmith is not available
     print("LangSmith not available, tracing disabled")
@@ -51,7 +51,7 @@ def create_langsmith_client():
             
         client = Client()
         has_trace = hasattr(client, 'trace')
-        print(f"LangSmith client created. has_trace={has_trace}, API Key set: {bool(os.environ.get('LANGSMITH_API_KEY'))}, Tracing enabled: {os.environ.get('LANGSMITH_TRACING')}")
+        print(f"LangSmith client created. has_trace={has_trace}, API Key set: {bool(os.environ.get('LANGSMITH_API_KEY'))}, Tracing enabled: {os.environ.get('LANGSMITH_TRACING_V2')}")
         return client
     except Exception as e:
         print(f"Error creating LangSmith client: {e}")
@@ -367,7 +367,7 @@ class AudioServer:
             except Exception as nested_error:
                 print(f"Error sending error about audio processing: {nested_error}")
             
-    @traceable(run_type="chain", name="Voice_Assistant_Pipeline")
+    @traceable(run_type="chain", name="Voice_Assistant_Pipeline", skip_if=lambda: not has_langsmith)
     async def process_recording(self, websocket, client_state: AudioProcessingState):
         """Process a completed recording
 

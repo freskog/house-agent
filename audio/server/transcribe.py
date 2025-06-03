@@ -16,7 +16,7 @@ from langsmith import traceable
 
 class TranscriptionConfig(BaseModel):
     """Configuration for transcription"""
-    model_name: str = "medium-q5_0"
+    model_name: str = "large-v3-turbo"
     device: str = "cpu"
     compute_type: str = "int8"
     language: Optional[str] = None
@@ -25,6 +25,7 @@ class TranscriptionConfig(BaseModel):
     beam_size: int = 5
     patience: float = 1.0
     use_coreml: bool = True
+    use_langsmith: bool = False  # Disabled by default
     
 class TranscriptionResult(BaseModel):
     """Result from transcription"""
@@ -152,7 +153,7 @@ class Transcriber:
         else:
             return audio_np.tobytes(), 1.0
 
-    @traceable(run_type="chain", name="Audio_Transcription")
+    @traceable(run_type="chain", name="Audio_Transcription", skip_if=lambda self: not self.config.use_langsmith)
     def transcribe_audio(self, audio_data: bytes, sample_rate: int = 16000, thread_id: Optional[str] = None) -> TranscriptionResult:
         """
         Transcribe audio data to text using optimized in-memory processing
@@ -164,20 +165,22 @@ class Transcriber:
             thread_id: Optional thread ID for LangSmith tracing
         """
         try:
-            # Configure environment for LangSmith if using a non-standard API key format
-            if os.environ.get("LANGSMITH_API_KEY", "").startswith("lsv2_"):
-                os.environ["LANGSMITH_ALLOW_ANY_API_KEY_FORMAT"] = "true"
-            
-            # Set thread_id in environment if provided
-            if thread_id:
-                os.environ["LANGSMITH_THREAD_ID"] = thread_id
+            # Only configure LangSmith if it's enabled
+            if self.config.use_langsmith:
+                # Configure environment for LangSmith if using a non-standard API key format
+                if os.environ.get("LANGSMITH_API_KEY", "").startswith("lsv2_"):
+                    os.environ["LANGSMITH_ALLOW_ANY_API_KEY_FORMAT"] = "true"
+                
+                # Set thread_id in environment if provided
+                if thread_id:
+                    os.environ["LANGSMITH_THREAD_ID"] = thread_id
                 
             # Validate audio data
             if not audio_data:
                 print("ERROR: Received empty audio data")
                 return TranscriptionResult(
                     text="",
-                    language="en"
+                    language=self.config.language or "auto"
                 )
             
             if self.model is None:
@@ -199,7 +202,7 @@ class Transcriber:
                 print(f"Audio too quiet (RMS: {audio_rms:.2f}), using fallback")
                 return TranscriptionResult(
                     text="I detected speech but it was too quiet to transcribe",
-                    language="en",
+                    language=self.config.language or "auto",
                     duration=duration,
                     process_time=0.0
                 )
@@ -230,19 +233,29 @@ class Transcriber:
             print(f"Starting whisper transcription with in-memory processing...")
             
             # Use numpy array directly - this eliminates file I/O completely!
-            segments = self.model.transcribe(audio_float)
+            # Pass translate=False to ensure we keep the original language
+            segments = self.model.transcribe(
+                audio_float,
+                translate=False,
+                language=self.config.language or "auto"
+            )
             process_time = time.time() - start_time
             
             # Extract result
             segments_list = list(segments)
             text = " ".join(segment.text for segment in segments_list)
             
+            # Get the detected language from the first segment
+            detected_language = None
+            if segments_list and hasattr(segments_list[0], 'language'):
+                detected_language = segments_list[0].language
+            
             # If transcription produced no text, provide a fallback response
             if not text.strip():
                 print(f"Empty transcription after {process_time:.2f}s, using fallback")
                 return TranscriptionResult(
                     text="I could not understand that. Could you please speak more clearly?",
-                    language="en",
+                    language=detected_language or self.config.language or "auto",
                     duration=duration,
                     process_time=process_time,
                     thread_id=thread_id
@@ -261,7 +274,7 @@ class Transcriber:
             # Create and return the result
             result = TranscriptionResult(
                 text=text.strip(),
-                language="en",  # Currently hardcoded language
+                language=detected_language or self.config.language or "auto",
                 segments=segments_formatted,
                 duration=duration,
                 process_time=process_time,
@@ -301,7 +314,11 @@ class Transcriber:
                 
                 # Run transcription
                 start_time = time.time()
-                segments = self.model.transcribe(temp_path)
+                segments = self.model.transcribe(
+                    temp_path,
+                    translate=False,
+                    language=self.config.language or "auto"
+                )
                 process_time = time.time() - start_time
                 
                 # Extract result

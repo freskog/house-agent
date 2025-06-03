@@ -18,8 +18,14 @@ class MessageType(str, Enum):
     STATUS = "status"
     ERROR = "error"
     DISCONNECT = "disconnect"  # New message type for client-initiated disconnection
+    TOOL_EVENT = "tool_event"  # New message type for tool events
 
-# Standardized audio configuration - no more options for format
+class ToolEventType(str, Enum):
+    """Types of tool events"""
+    TOOL_START = "tool_start"
+    TOOL_END = "tool_end"
+    TOOL_ERROR = "tool_error"
+
 class AudioConfig(BaseModel):
     """Audio configuration parameters"""
     # Standard configuration for WhisperCPP: 16kHz, 16-bit, mono
@@ -47,6 +53,13 @@ class ErrorPayload(BaseModel):
     """Payload for error messages"""
     error: str
     code: Optional[int] = None
+
+class ToolEventPayload(BaseModel):
+    """Payload for tool event messages"""
+    event_type: ToolEventType
+    tool_name: str
+    timestamp: float = Field(default_factory=time.time)
+    details: Optional[Dict[str, Any]] = None
 
 class Message(BaseModel):
     """Base message structure"""
@@ -120,6 +133,22 @@ class Message(BaseModel):
             payload={
                 "reason": reason
             }
+        )
+
+    @classmethod
+    def create_tool_event(cls, sequence: int, event_type: ToolEventType, tool_name: str, details: Optional[Dict[str, Any]] = None) -> 'Message':
+        """Create a tool event message"""
+        payload = {
+            "event_type": event_type,
+            "tool_name": tool_name,
+            "timestamp": time.time()
+        }
+        if details:
+            payload["details"] = details
+        return cls(
+            type=MessageType.TOOL_EVENT,
+            sequence=sequence,
+            payload=payload
         )
 
 # Default audio configuration

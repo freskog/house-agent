@@ -18,6 +18,9 @@ Options:
     --tts-voice         TTS voice to use (default: af_heart)
     --use-coreml        Use CoreML acceleration on Apple Silicon
     --verbose           Enable verbose logging
+    --use-langsmith     Enable LangSmith tracing (disabled by default)
+    --langsmith-api-key LangSmith API key for tracing
+    --langsmith-project LangSmith project name for tracing
 
 Example:
     python -m audio.server --host=0.0.0.0 --port=8765 --whisper-model=small --use-coreml
@@ -37,7 +40,7 @@ from audio.server.transcribe import TranscriptionConfig
 from audio.server.tts import TTSConfig
 
 # Configure LangSmith for tracing
-os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGSMITH_TRACING"] = os.environ.get("LANGSMITH_TRACING_V2", "false")
 os.environ["LANGSMITH_PROJECT"] = os.environ.get("LANGSMITH_PROJECT", "voice-assistant")
 
 # Configure logging
@@ -133,6 +136,7 @@ def parse_args():
     parser.add_argument("--tts-voice", default="af_heart", help="TTS voice to use")
     parser.add_argument("--use-coreml", action="store_true", help="Use CoreML acceleration on Apple Silicon (if available)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--use-langsmith", action="store_true", help="Enable LangSmith tracing (disabled by default)")
     parser.add_argument("--langsmith-api-key", help="LangSmith API key for tracing")
     parser.add_argument("--langsmith-project", help="LangSmith project name for tracing")
     
@@ -144,13 +148,17 @@ async def main():
     args = parse_args()
     
     # Configure LangSmith if specified
-    if args.langsmith_api_key:
-        os.environ["LANGSMITH_API_KEY"] = args.langsmith_api_key
-        logger.info("LangSmith API key configured from arguments")
-    
-    if args.langsmith_project:
-        os.environ["LANGSMITH_PROJECT"] = args.langsmith_project
-        logger.info(f"LangSmith project set to: {args.langsmith_project}")
+    if args.use_langsmith:
+        if args.langsmith_api_key:
+            os.environ["LANGSMITH_API_KEY"] = args.langsmith_api_key
+            logger.info("LangSmith API key configured from arguments")
+        
+        if args.langsmith_project:
+            os.environ["LANGSMITH_PROJECT"] = args.langsmith_project
+            logger.info(f"LangSmith project set to: {args.langsmith_project}")
+        os.environ["LANGSMITH_TRACING_V2"] = "true"
+    else:
+        os.environ["LANGSMITH_TRACING_V2"] = "false"
     
     # Configure logging level
     if args.verbose:

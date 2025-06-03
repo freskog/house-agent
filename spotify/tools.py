@@ -326,14 +326,7 @@ def create_spotify_tools(spotify_client: SpotifyClient) -> List[Tool]:
     def stop_music(*args, **kwargs) -> str:
         """Stop the currently playing music."""
         try:
-            # Check if there's music to stop
-            current = spotify_client.get_current_playback()
-            if not current or not current.get('item'):
-                result = "No music is currently playing"
-                update_music_state(result)
-                return result
-            
-            # Use pause to stop the music
+            # Try to pause the music directly - spotipy will handle token refresh automatically
             success = spotify_client.pause()
             if success:
                 update_music_state("Music stopped")

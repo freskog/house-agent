@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 from langchain_mcp_adapters.client import MultiServerMCPClient, SSEConnection
 from langchain_community.tools import TavilySearchResults
 
+# Import tool event types
+from audio.server.protocol import Message, ToolEventType
+
 # Import Spotify integration
 from spotify import SpotifyClient, create_spotify_tools
 from spotify.tools import current_music_state
@@ -36,8 +39,14 @@ logger = logging.getLogger("house_agent")
 # Load environment variables
 load_dotenv(override = True)
 
-# Initialize LangSmith client
-langsmith_client = Client()
+# Initialize LangSmith client only if enabled
+langsmith_client = None
+if os.environ.get("LANGSMITH_TRACING_V2", "false").lower() == "true":
+    from langsmith import Client
+    langsmith_client = Client()
+    print("LangSmith client initialized")
+else:
+    print("LangSmith tracing disabled")
 
 # Set up in-memory caching for LangChain to avoid those warnings
 from langchain.globals import set_llm_cache
@@ -54,6 +63,75 @@ class AgentResponse(BaseModel):
 # Define state
 class AgentState(TypedDict):
     messages: Annotated[List[SystemMessage | HumanMessage | AIMessage | ToolMessage], add_messages]
+    audio_server: Optional[Any] = None  # Reference to the audio server for tool events
+    current_client: Optional[Any] = None  # Reference to the current websocket client
+
+class EventEmittingToolNode(ToolNode):
+    """Wrapper around ToolNode that emits tool events"""
+    
+    def __init__(self, tools):
+        super().__init__(tools)
+        
+    async def invoke(self, state: AgentState, config: Optional[Dict[str, Any]] = None):
+        """Invoke tools and emit tool events"""
+        # Extract audio server and client from state
+        audio_server = state.get("audio_server")
+        current_client = state.get("current_client")
+        
+        # Get the last message to find which tool is being called
+        last_message = state["messages"][-1] if state["messages"] else None
+        tool_name = None
+        
+        if last_message and hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            tool_call = last_message.tool_calls[0]  # Get first tool call
+            tool_name = getattr(tool_call, "name", None)
+            
+            # Send tool start event if we have audio server and client
+            if audio_server and current_client and tool_name:
+                try:
+                    # Create and send tool start event
+                    start_event = Message.create_tool_event(
+                        sequence=getattr(current_client, "next_sequence", 0),
+                        event_type=ToolEventType.TOOL_START,
+                        tool_name=tool_name
+                    )
+                    await audio_server.broadcast(start_event)
+                except Exception as e:
+                    print(f"Error sending tool start event: {e}")
+        
+        try:
+            # Call the original invoke method
+            result = await super().invoke(state, config)
+            
+            # Send tool end event
+            if audio_server and current_client and tool_name:
+                try:
+                    # Create and send tool end event
+                    end_event = Message.create_tool_event(
+                        sequence=getattr(current_client, "next_sequence", 0),
+                        event_type=ToolEventType.TOOL_END,
+                        tool_name=tool_name
+                    )
+                    await audio_server.broadcast(end_event)
+                except Exception as e:
+                    print(f"Error sending tool end event: {e}")
+                    
+            return result
+        except Exception as e:
+            # Send tool error event
+            if audio_server and current_client and tool_name:
+                try:
+                    # Create and send tool error event
+                    error_event = Message.create_tool_event(
+                        sequence=getattr(current_client, "next_sequence", 0),
+                        event_type=ToolEventType.TOOL_ERROR,
+                        tool_name=tool_name,
+                        details={"error": str(e)}
+                    )
+                    await audio_server.broadcast(error_event)
+                except Exception as event_error:
+                    print(f"Error sending tool error event: {event_error}")
+            raise  # Re-raise the original exception
 
 # Configure OpenAI caching and endpoints
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -336,11 +414,11 @@ For all other requests:
         # Bind the tools to the LLM directly - no need for custom schema conversion
         llm = llm.bind_tools(all_tools)
         
-        # Use standard ToolNode without any mapping - the MCP server provides tools with the correct naming already
-        tool_node = ToolNode(all_tools)
+        # Use our custom ToolNode instead of the standard one
+        tool_node = EventEmittingToolNode(all_tools)
         
         # Create the agent function that processes messages and returns a new message
-        @traceable(name="Agent", run_type="chain")
+        @traceable(name="Agent", run_type="chain", skip_if=lambda: os.environ.get("LANGSMITH_TRACING_V2", "false").lower() != "true")
         def agent(state: AgentState):
             # Process messages to ensure all ToolMessages have required fields
             processed_messages = []
