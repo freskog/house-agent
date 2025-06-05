@@ -1,0 +1,136 @@
+INFO:langgraph_api.cli:
+
+        Welcome to
+
+╦  ┌─┐┌┐┌┌─┐╔═╗┬─┐┌─┐┌─┐┬ ┬
+║  ├─┤││││ ┬║ ╦├┬┘├─┤├─┘├─┤
+╩═╝┴ ┴┘└┘└─┘╚═╝┴└─┴ ┴┴  ┴ ┴
+
+- 🚀 API: [36mhttp://127.0.0.1:2024[0m
+- 🎨 Studio UI: [36mhttps://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024[0m
+- 📚 API Docs: [36mhttp://127.0.0.1:2024/docs[0m
+
+This in-memory server is designed for development and testing.
+For production use, please use LangGraph Cloud.
+
+
+[2m2025-06-04T09:35:57.462526Z[0m [[32m[1minfo     [0m] [1mUsing langgraph_runtime_inmem [0m [[0m[1m[34mlanggraph_runtime[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:35:57.466206Z[0m [[32m[1minfo     [0m] [1mUsing auth of type=noop       [0m [[0m[1m[34mlanggraph_api.auth.middleware[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:35:57.467151Z[0m [[32m[1minfo     [0m] [1mStarting In-Memory runtime with langgraph-api=0.2.34[0m [[0m[1m[34mlanggraph_runtime_inmem.lifespan[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35masyncio_0[0m [36mversion[0m=[35m0.2.34[0m
+[2m2025-06-04T09:35:57.478669Z[0m [[33m[1mwarning  [0m] [1mHeads up: You've set --allow-blocking, which allows synchronous blocking I/O operations. Be aware that blocking code in one run may tie up the shared event loop and slow down ALL other server operations. For best performance, either convert blocking code to async patterns or set BG_JOB_ISOLATED_LOOPS=true in production to isolate each run in its own event loop.[0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35masyncio_1[0m
+LangSmith tracing explicitly disabled
+[2m2025-06-04T09:35:57.479309Z[0m [[32m[1minfo     [0m] [1mStarting thread TTL sweeper with interval 5 minutes[0m [[0m[1m[34mlanggraph_api.thread_ttl[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36minterval_minutes[0m=[35m5[0m [36mstrategy[0m=[35mdelete[0m [36mthread_name[0m=[35masyncio_1[0m
+[2m2025-06-04T09:35:57.479580Z[0m [[32m[1minfo     [0m] [1mStarting 1 background workers [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35masyncio_2[0m
+[2m2025-06-04T09:35:57.479798Z[0m [[32m[1minfo     [0m] [1mWorker stats                  [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mactive[0m=[35m0[0m [36mapi_variant[0m=[35mlocal_dev[0m [36mavailable[0m=[35m1[0m [36mmax[0m=[35m1[0m [36mthread_name[0m=[35masyncio_1[0m
+LangSmith disabled - using dummy decorators
+[2m2025-06-04T09:35:57.981467Z[0m [[32m[1minfo     [0m] [1mQueue stats                   [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmax_age_secs[0m=[35mNone[0m [36mmed_age_secs[0m=[35mNone[0m [36mn_pending[0m=[35m0[0m [36mn_running[0m=[35m0[0m [36mthread_name[0m=[35masyncio_1[0m
+[2m2025-06-04T09:35:57.982081Z[0m [[32m[1minfo     [0m] [1mSweeped runs                  [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mrun_ids[0m=[35m[][0m [36mthread_name[0m=[35mMainThread[0m
+LangSmith module imported successfully, tracing enabled: False
+LangSmith tracing disabled
+Configured LangChain cache
+Using custom OpenAI base URL: https://api.openai.com/v1
+OpenAI client configured with API key and caching support
+Loaded Tavily API Key: tvly-...kAUqh
+Loaded HA API Key: eyJhb...0WVAI
+[2m2025-06-04T09:35:59.451051Z[0m [[32m[1minfo     [0m] [1mRegistering graph with id 'agent'[0m [[0m[1m[34mlanggraph_api.graph[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mgraph_id[0m=[35magent[0m [36mthread_name[0m=[35masyncio_2[0m
+Server started in 2.24s
+[2m2025-06-04T09:35:59.476890Z[0m [[32m[1minfo     [0m] [1mServer started in 2.24s       [0m [[0m[1m[34mbrowser_opener[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmessage[0m=[35m'Server started in 2.24s'[0m [36mthread_name[0m=[35m'Thread-2 (_open_browser)'[0m
+🎨 Opening Studio in your browser...
+[2m2025-06-04T09:35:59.476984Z[0m [[32m[1minfo     [0m] [1m🎨 Opening Studio in your browser...[0m [[0m[1m[34mbrowser_opener[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmessage[0m=[35m'🎨 Opening Studio in your browser...'[0m [36mthread_name[0m=[35m'Thread-2 (_open_browser)'[0m
+URL: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+[2m2025-06-04T09:35:59.477044Z[0m [[32m[1minfo     [0m] [1mURL: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024[0m [[0m[1m[34mbrowser_opener[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmessage[0m=[35m'URL: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024'[0m [36mthread_name[0m=[35m'Thread-2 (_open_browser)'[0m
+[2m2025-06-04T09:35:59.983403Z[0m [[32m[1minfo     [0m] [1mGetting auth instance: None   [0m [[0m[1m[34mlanggraph_api.auth.custom[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mlanggraph_auth[0m=[35mNone[0m [36mthread_name[0m=[35mMainThread[0m
+Starting agent initialization...
+Added Home Assistant connection to MCP client
+Initializing MCP client with connections...
+Initializing MCP client with 1 connections
+Tavily search tool created
+Created 10 Spotify tools
+Getting tools from MCP client...
+[2m2025-06-04T09:36:00.003934Z[0m [[32m[1minfo     [0m] [1mConnecting to SSE endpoint: http://10.10.100.126:8123/mcp_server/sse[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.017109Z[0m [[32m[1minfo     [0m] [1mHTTP Request: GET http://10.10.100.126:8123/mcp_server/sse "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.017428Z[0m [[32m[1minfo     [0m] [1mReceived endpoint URL: http://10.10.100.126:8123/mcp_server/messages/01JWX4RB18RBRMGNKAVG77VQVJ[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.017561Z[0m [[32m[1minfo     [0m] [1mStarting post writer with endpoint URL: http://10.10.100.126:8123/mcp_server/messages/01JWX4RB18RBRMGNKAVG77VQVJ[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.021372Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB18RBRMGNKAVG77VQVJ "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.024461Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB18RBRMGNKAVG77VQVJ "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.026109Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB18RBRMGNKAVG77VQVJ "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+Loaded 16 tools from MCP client
+Added Tavily tool to the agent's tools list
+Total tools available: 27
+Spotify tools: ['get_current_song', 'play_music', 'pause_music', 'stop_music', 'next_track', 'previous_track', 'set_volume', 'search_music', 'get_spotify_devices', 'create_radio_station']
+Listing available prompts from Home Assistant...
+[2m2025-06-04T09:36:00.033634Z[0m [[32m[1minfo     [0m] [1mConnecting to SSE endpoint: http://10.10.100.126:8123/mcp_server/sse[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.045397Z[0m [[32m[1minfo     [0m] [1mHTTP Request: GET http://10.10.100.126:8123/mcp_server/sse "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.045670Z[0m [[32m[1minfo     [0m] [1mReceived endpoint URL: http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.045787Z[0m [[32m[1minfo     [0m] [1mStarting post writer with endpoint URL: http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9[0m [[0m[1m[34mmcp.client.sse[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.048746Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9 "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.051015Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9 "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:00.052574Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9 "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+Found 1 prompts:
+1. Assist
+Getting content for prompt 'Assist'...
+[2m2025-06-04T09:36:00.059244Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST http://10.10.100.126:8123/mcp_server/messages/01JWX4RB24ZV8V67XHSHXDAED9 "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+No content found in prompt details
+Checking current music state on startup...
+LangSmith tracing explicitly disabled
+LangSmith disabled - using dummy decorators
+LangSmith tracing disabled
+Configured LangChain cache
+Using custom OpenAI base URL: https://api.openai.com/v1
+OpenAI client configured with API key and caching support
+Loaded Tavily API Key: tvly-...kAUqh
+Loaded HA API Key: eyJhb...0WVAI
+Current music state: No music is currently playing
+System message created and cached (6184 chars)
+Available tool names: {'HassMediaUnpause', 'todo_get_items', 'tavily_search_results_json', 'HassTurnOn', 'previous_track', 'HassLightSet', 'search_music', 'HassMediaPrevious', 'HassClimateSetTemperature', 'HassMediaPause', 'HassBroadcast', 'HassTurnOff', 'play_music', 'HassListCompleteItem', 'pause_music', 'HassSetPosition', 'set_volume', 'create_radio_station', 'get_current_song', 'next_track', 'stop_music', 'get_spotify_devices', 'HassSetVolume', 'HassMediaNext', 'HassListAddItem', 'GetLiveContext', 'HassCancelAllTimers'}
+Skipping warm-up call (running under ASGI server)
+Agent graph initialization completed in 0.28 seconds
+[2m2025-06-04T09:36:23.332999Z[0m [[32m[1minfo     [0m] [1mCreating thread               [0m [[0m[1m[34mlanggraph_runtime_inmem.ops[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_id[0m=[35mUUID('836cb49e-7c52-4882-a285-65a7b36bd09c')[0m [36mthread_name[0m=[35masyncio_0[0m
+[2m2025-06-04T09:36:23.333286Z[0m [[32m[1minfo     [0m] [1mCreated run                   [0m [[0m[1m[34mlanggraph_runtime_inmem.ops[0m][0m [36mafter_seconds[0m=[35m0[0m [36mapi_variant[0m=[35mlocal_dev[0m [36massistant_id[0m=[35mfe096781-5601-53d2-b2f6-0d3403f7e9ca[0m [36mif_not_exists[0m=[35mreject[0m [36mmultitask_strategy[0m=[35mreject[0m [36mrun_id[0m=[35m1f041276-0e04-6b8c-b9eb-1ccea6e935f8[0m [36mstream_mode[0m=[35m['values'][0m [36mtemporary[0m=[35mTrue[0m [36mthread_id[0m=[35mNone[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:36:24.047455Z[0m [[32m[1minfo     [0m] [1mStarting background run       [0m [[0m[1m[34mlanggraph_api.worker[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36massistant_id[0m=[35mfe096781-5601-53d2-b2f6-0d3403f7e9ca[0m [36mgraph_id[0m=[35magent[0m [36mrequest_id[0m=[35mde62b5ea-0332-4408-8d56-6d5cf5f613cc[0m [36mrun_attempt[0m=[35m1[0m [36mrun_id[0m=[35m1f041276-0e04-6b8c-b9eb-1ccea6e935f8[0m [36mrun_queue_ms[0m=[35m713[0m [36mrun_started_at[0m=[35m2025-06-04T09:36:24.046737+00:00[0m [36mthread_id[0m=[35m836cb49e-7c52-4882-a285-65a7b36bd09c[0m [36mthread_name[0m=[35masyncio_2[0m
+Returning cached graph (already initialized)
+[36;1m[1;3m[-1:checkpoint][0m [1mState at the end of step -1:
+[0m{'messages': []}
+[36;1m[1;3m[0:tasks][0m [1mStarting 1 task for step 0:
+[0m- [32;1m[1;3m__start__[0m -> {'messages': [{'content': 'test MCP tools', 'role': 'user'}]}
+[36;1m[1;3m[0:writes][0m [1mFinished step 0 with writes to 1 channel:
+[0m- [33;1m[1;3mmessages[0m -> [{'content': 'test MCP tools', 'role': 'user'}]
+[36;1m[1;3m[0:checkpoint][0m [1mState at the end of step 0:
+[0m{'messages': [HumanMessage(content='test MCP tools', additional_kwargs={}, response_metadata={}, id='1b012818-6ef1-47d3-bf15-34789d3bedd6')]}
+[36;1m[1;3m[1:tasks][0m [1mStarting 1 task for step 1:
+[0m- [32;1m[1;3magent[0m -> {'messages': [HumanMessage(content='test MCP tools', additional_kwargs={}, response_metadata={}, id='1b012818-6ef1-47d3-bf15-34789d3bedd6')]}
+[2m2025-06-04T09:36:24.843349Z[0m [[32m[1minfo     [0m] [1mHTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"[0m [[0m[1m[34mhttpx[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36massistant_id[0m=[35mfe096781-5601-53d2-b2f6-0d3403f7e9ca[0m [36mgraph_id[0m=[35magent[0m [36mrequest_id[0m=[35mde62b5ea-0332-4408-8d56-6d5cf5f613cc[0m [36mrun_attempt[0m=[35m1[0m [36mrun_id[0m=[35m1f041276-0e04-6b8c-b9eb-1ccea6e935f8[0m [36mthread_id[0m=[35m836cb49e-7c52-4882-a285-65a7b36bd09c[0m [36mthread_name[0m=[35masyncio_0[0m
+[36;1m[1;3m[1:writes][0m [1mFinished step 1 with writes to 4 channels:
+[0m- [33;1m[1;3mmessages[0m -> [{'additional_kwargs': {},
+  'content': "It seems like you're testing the system. How can I assist you "
+             'today? If you have a specific request or question, feel free to '
+             'let me know!',
+  'example': False,
+  'id': 'run--8064c82c-257d-494e-a2d2-716d21a3e928-0',
+  'invalid_tool_calls': [],
+  'name': None,
+  'response_metadata': {'finish_reason': 'stop',
+                        'model_name': 'gpt-4o-mini-2024-07-18',
+                        'service_tier': 'default',
+                        'system_fingerprint': 'fp_34a54ae93c'},
+  'tool_calls': [],
+  'type': 'ai',
+  'usage_metadata': None}]
+- [33;1m[1;3mneeds_clarification[0m -> False
+- [33;1m[1;3moriginal_request[0m -> None
+- [33;1m[1;3mclarification_count[0m -> 0
+[36;1m[1;3m[1:checkpoint][0m [1mState at the end of step 1:
+[0m{'clarification_count': 0,
+ 'messages': [HumanMessage(content='test MCP tools', additional_kwargs={}, response_metadata={}, id='1b012818-6ef1-47d3-bf15-34789d3bedd6'),
+              AIMessage(content="It seems like you're testing the system. How can I assist you today? If you have a specific request or question, feel free to let me know!", additional_kwargs={'invalid_tool_calls': [], 'usage_metadata': None}, response_metadata={'finish_reason': 'stop', 'model_name': 'gpt-4o-mini-2024-07-18', 'system_fingerprint': 'fp_34a54ae93c', 'service_tier': 'default'}, id='run--8064c82c-257d-494e-a2d2-716d21a3e928-0')],
+ 'needs_clarification': False,
+ 'original_request': None}
+[2m2025-06-04T09:36:25.295886Z[0m [[32m[1minfo     [0m] [1mBackground run succeeded      [0m [[0m[1m[34mlanggraph_api.worker[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36massistant_id[0m=[35mfe096781-5601-53d2-b2f6-0d3403f7e9ca[0m [36mgraph_id[0m=[35magent[0m [36mrequest_id[0m=[35mde62b5ea-0332-4408-8d56-6d5cf5f613cc[0m [36mrun_attempt[0m=[35m1[0m [36mrun_created_at[0m=[35m2025-06-04T09:36:23.333267+00:00[0m [36mrun_ended_at[0m=[35m2025-06-04T09:36:25.295767+00:00[0m [36mrun_exec_ms[0m=[35m1249[0m [36mrun_id[0m=[35m1f041276-0e04-6b8c-b9eb-1ccea6e935f8[0m [36mrun_started_at[0m=[35m2025-06-04T09:36:24.046737+00:00[0m [36mthread_id[0m=[35m836cb49e-7c52-4882-a285-65a7b36bd09c[0m [36mthread_name[0m=[35masyncio_2[0m
+[2m2025-06-04T09:36:57.627250Z[0m [[32m[1minfo     [0m] [1mWorker stats                  [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mactive[0m=[35m0[0m [36mapi_variant[0m=[35mlocal_dev[0m [36mavailable[0m=[35m1[0m [36mmax[0m=[35m1[0m [36mthread_name[0m=[35masyncio_0[0m
+[2m2025-06-04T09:36:58.129319Z[0m [[32m[1minfo     [0m] [1mQueue stats                   [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmax_age_secs[0m=[35mNone[0m [36mmed_age_secs[0m=[35mNone[0m [36mn_pending[0m=[35m0[0m [36mn_running[0m=[35m0[0m [36mthread_name[0m=[35masyncio_2[0m
+[2m2025-06-04T09:37:57.779592Z[0m [[32m[1minfo     [0m] [1mWorker stats                  [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mactive[0m=[35m0[0m [36mapi_variant[0m=[35mlocal_dev[0m [36mavailable[0m=[35m1[0m [36mmax[0m=[35m1[0m [36mthread_name[0m=[35masyncio_0[0m
+[2m2025-06-04T09:37:58.282535Z[0m [[32m[1minfo     [0m] [1mQueue stats                   [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmax_age_secs[0m=[35mNone[0m [36mmed_age_secs[0m=[35mNone[0m [36mn_pending[0m=[35m0[0m [36mn_running[0m=[35m0[0m [36mthread_name[0m=[35masyncio_2[0m
+[2m2025-06-04T09:38:57.918546Z[0m [[32m[1minfo     [0m] [1mWorker stats                  [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mactive[0m=[35m0[0m [36mapi_variant[0m=[35mlocal_dev[0m [36mavailable[0m=[35m1[0m [36mmax[0m=[35m1[0m [36mthread_name[0m=[35masyncio_0[0m
+[2m2025-06-04T09:38:58.420849Z[0m [[32m[1minfo     [0m] [1mQueue stats                   [0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mmax_age_secs[0m=[35mNone[0m [36mmed_age_secs[0m=[35mNone[0m [36mn_pending[0m=[35m0[0m [36mn_running[0m=[35m0[0m [36mthread_name[0m=[35masyncio_2[0m
+[2m2025-06-04T09:39:42.734030Z[0m [[32m[1minfo     [0m] [1mShutting down background workers[0m [[0m[1m[34mlanggraph_runtime_inmem.queue[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m
+[2m2025-06-04T09:39:42.734358Z[0m [[32m[1minfo     [0m] [1mShutting down remote graphs   [0m [[0m[1m[34mlanggraph_api.graph[0m][0m [36mapi_variant[0m=[35mlocal_dev[0m [36mthread_name[0m=[35mMainThread[0m

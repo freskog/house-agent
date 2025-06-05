@@ -301,7 +301,17 @@ async def make_graph():
         # Get tools from MCP client - these are already properly formatted LangChain tools
         try:
             print("Getting tools from MCP client...")
-            mcp_tools = await client.get_tools()
+            # According to the documentation, get_tools() is async but we need to await it
+            # The error suggests it returns a list directly
+            try:
+                mcp_tools = await client.get_tools()
+            except TypeError as e:
+                # Handle the case where get_tools() might return a list directly (bug in some versions)
+                if "object list can't be used in 'await' expression" in str(e) or "can't be used in 'await' expression" in str(e):
+                    print("Warning: get_tools() returned a list directly, calling without await")
+                    mcp_tools = client.get_tools()
+                else:
+                    raise e
             print(f"Loaded {len(mcp_tools)} tools from MCP client")
         except Exception as e:
             print(f"Error loading MCP tools: {e}")
@@ -320,43 +330,59 @@ async def make_graph():
             spotify_tool_names = [tool.name for tool in spotify_tools]
             print(f"Spotify tools: {spotify_tool_names}")
 
-        # Try to load prompt from MCP server (simplifying the approach from previous version)
+        # Try to load prompt from MCP server (only if we have connections)
         homeassistant_content = None
-        try:
-            # Get prompts from Home Assistant
-            print("Listing available prompts from Home Assistant...")
-            async with client.session("home_assistant") as session:
-                prompts = await session.list_prompts()
+        if connections and "home_assistant" in connections:
+            try:
+                # Get prompts from Home Assistant
+                print("Listing available prompts from Home Assistant...")
                 
-                # Handle different return types
-                prompts_list = prompts.prompts if hasattr(prompts, "prompts") else prompts
-                
-                if prompts_list:
-                    print(f"Found {len(prompts_list)} prompts:")
-                    for i, prompt in enumerate(prompts_list):
-                        prompt_name = prompt.name if hasattr(prompt, "name") else prompt.get("name", "Unknown")
-                        print(f"{i+1}. {prompt_name}")
-                        
-                    # Try to get the first prompt
-                    first_prompt = prompts_list[0]
-                    prompt_name = first_prompt.name if hasattr(first_prompt, "name") else first_prompt.get("name", "Unknown")
-                    print(f"Getting content for prompt '{prompt_name}'...")
-                    try:
-                        prompt_details = await session.get_prompt(prompt_name)
-                        if hasattr(prompt_details, "content"):
-                            homeassistant_content = prompt_details.content
-                        elif isinstance(prompt_details, dict):
-                            homeassistant_content = prompt_details.get("content")
-                        if homeassistant_content:
-                            print(f"Successfully loaded prompt content ({len(homeassistant_content)} chars)")
-                        else:
-                            print("No content found in prompt details")
-                    except Exception as e:
-                        print(f"Failed to get prompt details: {e}")
+                # Check if the session method exists (some versions might not have it)
+                if not hasattr(client, 'session'):
+                    print("Warning: MultiServerMCPClient does not have 'session' method - skipping prompts")
                 else:
-                    print("No prompts found")
-        except Exception as e:
-            print(f"Failed to list prompts: {e}")
+                    async with client.session("home_assistant") as session:
+                        # Some MCP implementations return prompts directly, others as coroutines
+                        try:
+                            prompts = await session.list_prompts()
+                        except TypeError as e:
+                            # If list_prompts() is not awaitable, call it directly
+                            if "can't be used in 'await' expression" in str(e):
+                                prompts = session.list_prompts()
+                            else:
+                                raise e
+                        
+                        # Handle different return types
+                        prompts_list = prompts.prompts if hasattr(prompts, "prompts") else prompts
+                        
+                        if prompts_list:
+                            print(f"Found {len(prompts_list)} prompts:")
+                            for i, prompt in enumerate(prompts_list):
+                                prompt_name = prompt.name if hasattr(prompt, "name") else prompt.get("name", "Unknown")
+                                print(f"{i+1}. {prompt_name}")
+                                
+                            # Try to get the first prompt
+                            first_prompt = prompts_list[0]
+                            prompt_name = first_prompt.name if hasattr(first_prompt, "name") else first_prompt.get("name", "Unknown")
+                            print(f"Getting content for prompt '{prompt_name}'...")
+                            try:
+                                prompt_details = await session.get_prompt(prompt_name)
+                                if hasattr(prompt_details, "content"):
+                                    homeassistant_content = prompt_details.content
+                                elif isinstance(prompt_details, dict):
+                                    homeassistant_content = prompt_details.get("content")
+                                if homeassistant_content:
+                                    print(f"Successfully loaded prompt content ({len(homeassistant_content)} chars)")
+                                else:
+                                    print("No content found in prompt details")
+                            except Exception as e:
+                                print(f"Failed to get prompt details: {e}")
+                        else:
+                            print("No prompts found")
+            except Exception as e:
+                print(f"Failed to list prompts: {e}")
+        else:
+            print("No Home Assistant connection configured - skipping prompt loading")
         
         # Check current music state instead of hardcoding "Nothing playing"
         current_song = "Nothing playing"
