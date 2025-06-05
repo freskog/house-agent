@@ -41,13 +41,7 @@ def update_music_state(new_state: str):
     current_music_state["current_song"] = new_state
     current_music_state["last_updated"] = datetime.datetime.now()
     
-    # Also update the agent's current_music_info if it exists
-    try:
-        import agent
-        if hasattr(agent, 'current_music_info'):
-            agent.current_music_info["current_song"] = new_state
-    except ImportError:
-        pass  # Agent module not available
+    # Legacy agent global removed - state now managed by nodes
 
 class PlayMusicInput(BaseModel):
     """Input schema for playing music."""
@@ -579,7 +573,20 @@ Please retry with the correct context parameter."""
     def stop_music(*args, **kwargs) -> str:
         """Stop the currently playing music."""
         try:
-            # Try to pause the music directly - spotipy will handle token refresh automatically
+            # Check current playback state first
+            current = _get_spotify_client().get_current_playback()
+            
+            # If no music session at all, consider it already stopped
+            if not current or not current.get('item'):
+                update_music_state("Music stopped")
+                return ""  # Silent success - already stopped
+            
+            # If music is already paused, consider it already stopped
+            if not current.get('is_playing', False):
+                update_music_state("Music stopped")
+                return ""  # Silent success - already paused/stopped
+            
+            # Music is playing, so pause it
             success = _get_spotify_client().pause()
             if success:
                 update_music_state("Music stopped")
