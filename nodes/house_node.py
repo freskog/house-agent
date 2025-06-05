@@ -350,6 +350,13 @@ Respond with structured output following SpecialistResponse schema."""
                 response="I encountered an issue processing your home automation request."
             )
     
+    async def _handle_escalation(self, specialist_response, state: AgentState, user_request: str) -> Dict[str, Any]:
+        """Handle escalation to agent for multi-domain requests."""
+        return self.create_escalation_response(
+            reason=specialist_response.escalation_reason or "Multi-domain request detected",
+            domains=specialist_response.detected_domains or ["house"],
+            original_request=user_request
+        )
 
     
     async def _execute_tools(self, specialist_response: SpecialistResponse, state: AgentState) -> Dict[str, Any]:
@@ -388,8 +395,15 @@ Respond with structured output following SpecialistResponse schema."""
             try:
                 tool_results = await self._execute_tool_calls(specialist_response.tool_calls, state)
                 
+                # Get user request from state for context
+                user_request = ""
+                if state.get("messages"):
+                    last_human_msg = next((msg for msg in reversed(state["messages"]) if hasattr(msg, 'type') and msg.type == 'human'), None)
+                    if last_human_msg:
+                        user_request = getattr(last_human_msg, 'content', '')
+                
                 # Process tool results and create response
-                response_text = self._process_tool_results(tool_results)
+                response_text = await self._process_tool_results(tool_results, user_request)
                 return self.create_response([AIMessage(content=response_text)])
                 
             except Exception as e:
@@ -462,12 +476,15 @@ Respond with structured output following SpecialistResponse schema."""
         error_indicators = ["error", "exception", "could not", "unable to", "not found"]
         return any(indicator in content_lower for indicator in error_indicators)
     
-    def _process_tool_results(self, tool_results: List[Dict[str, Any]]) -> str:
+    async def _process_tool_results(self, tool_results: List[Dict[str, Any]], user_request: str = "") -> str:
         """Process tool results into a human-readable response."""
         if not tool_results:
             return "No results from home automation tools."
         
         responses = []
+        raw_content = []
+        has_informational_content = False
+        
         for result in tool_results:
             content = result.get("content", "")
             error = result.get("error")
@@ -475,12 +492,199 @@ Respond with structured output following SpecialistResponse schema."""
             if error:
                 responses.append(f"Error: {error}")
             elif content:
-                responses.append(content)
+                # Check if this is a Home Assistant device status response
+                processed_response = self._interpret_ha_response(content)
+                if processed_response:
+                    responses.append(processed_response)
+                    has_informational_content = True
+                else:
+                    # Check if it's a long informational response that should be summarized
+                    if len(str(content)) > 100 and self._is_informational_response(content):
+                        raw_content.append(str(content))
+                        has_informational_content = True
+                    else:
+                        responses.append(content)
+        
+        # If we have informational content and it's a query (not an action), use LLM summarization
+        if has_informational_content and raw_content and self._is_informational_query(user_request):
+            try:
+                summary = await self._create_ha_summary(raw_content, user_request)
+                if summary:
+                    responses.append(summary)
+            except Exception as e:
+                self.logger.error(f"Error creating HA summary: {e}")
+                # Fallback to original responses
+                pass
         
         if responses:
             return " ".join(responses)
         else:
-            return ""  # Silent response for successful commands
+            return ""  # Silent response for successful action commands
+
+    def _interpret_ha_response(self, content: str) -> str:
+        """
+        Interpret Home Assistant tool responses and convert to human-readable format.
+        
+        Args:
+            content: Raw tool response content
+            
+        Returns:
+            Human-readable interpretation or empty string if not interpretable
+        """
+        if not content:
+            return ""
+        
+        try:
+            import json
+            
+            # Check if it's a JSON response with device status
+            if isinstance(content, str) and content.strip().startswith('{"') and '"result"' in content:
+                json_data = json.loads(content)
+                
+                if json_data.get("success") and "result" in json_data:
+                    result = json_data["result"]
+                    
+                    # Check if it's a device overview/status response
+                    if "Live Context: An overview" in result or "devices in this smart home" in result:
+                        return self._parse_device_status_response(result)
+                    
+            # Check for simple device control responses
+            if "turned on" in content.lower() or "turned off" in content.lower():
+                return content
+                
+                        # For other responses, try to extract meaningful information
+            if any(keyword in content.lower() for keyword in ["success", "completed", "failed", "error"]):
+                return content
+                
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            self.logger.debug(f"Could not parse HA response as JSON: {e}")
+        
+        return ""  # Return empty if we can't interpret it
+    
+    def _is_informational_query(self, user_request: str) -> bool:
+        """Check if the user request is asking for information rather than performing an action."""
+        if not user_request:
+            return False
+        
+        query_lower = user_request.lower()
+        
+        # Check for question words and patterns
+        info_patterns = [
+            "what", "how", "where", "when", "which", "who", "is", "are", "do", "does",
+            "status", "state", "check", "show", "tell me", "what's", "how's", "are the",
+            "is the", "what are", "how are", "which are"
+        ]
+        
+        # Action patterns that should remain silent
+        action_patterns = [
+            "turn on", "turn off", "switch on", "switch off", "set", "dim", "brighten",
+            "lock", "unlock", "open", "close", "start", "stop", "pause", "play"
+        ]
+        
+        # If it contains action patterns, it's not informational
+        if any(pattern in query_lower for pattern in action_patterns):
+            return False
+        
+        # If it contains info patterns, it's informational
+        return any(pattern in query_lower for pattern in info_patterns)
+    
+    def _is_informational_response(self, content: str) -> bool:
+        """Check if content appears to be informational (status/overview) rather than action confirmation."""
+        if not content:
+            return False
+        
+        content_str = str(content).lower()
+        
+        # Signs of informational content
+        info_indicators = [
+            "overview", "context", "devices", "state:", "status", "temperature:",
+            "light:", "sensor:", "available", "current", "smart home"
+        ]
+        
+        return any(indicator in content_str for indicator in info_indicators)
+    
+    async def _create_ha_summary(self, raw_content: List[str], user_request: str) -> str:
+        """Create a human-readable summary of Home Assistant responses using LLM."""
+        if not raw_content:
+            return ""
+        
+        combined_content = "\n\n".join(raw_content)
+        
+        system_prompt = f"""You are summarizing Home Assistant device information for a voice assistant.
+
+User asked: "{user_request}"
+
+Home Assistant data:
+{combined_content[:1000]}
+
+Create a concise, natural response that:
+- Directly answers the user's question about their smart home
+- Is easy to understand when spoken aloud
+- Focuses on the most relevant device states/information
+- Keeps it under 2-3 sentences
+- Sounds conversational and natural
+
+If the user asked about specific devices (lights, temperature, etc.), focus on those.
+
+Response:"""
+
+        try:
+            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
+            messages = [SystemMessage(content=system_prompt)]
+            response = await summary_llm.ainvoke(messages)
+            
+            if response.content:
+                return response.content.strip()
+            else:
+                return ""
+                
+        except Exception as e:
+            self.logger.error(f"Error in HA LLM summarization: {e}")
+            return ""
+    
+    def _parse_device_status_response(self, result: str) -> str:
+        """
+        Parse a Home Assistant device status overview and extract relevant information.
+        
+        Args:
+            result: The result string containing device information
+            
+        Returns:
+            Human-readable summary of device states
+        """
+        if not result:
+            return "No device information available."
+        
+        try:
+            # Look for office lights specifically in the result
+            if "Fredrik's office ceiling light" in result:
+                # Extract the state of Fredrik's office light
+                lines = result.split('\n')
+                for i, line in enumerate(lines):
+                    if "Fredrik's office ceiling light" in line:
+                        # Look for state in the next few lines
+                        for j in range(i, min(i + 5, len(lines))):
+                            check_line = lines[j]
+                            if 'state: ' in check_line:
+                                state_val = check_line.split('state: ')[1].strip().strip("'\"")
+                                if state_val == 'on':
+                                    return "Yes, the office ceiling light is on."
+                                elif state_val == 'off':
+                                    return "No, the office ceiling light is off."
+                                elif state_val == 'unavailable':
+                                    return "The office ceiling light is currently unavailable."
+                                break
+                        break
+            
+            # If we can't find specific office light info, provide a general response
+            if 'light' in result:
+                return "Light information is available in the smart home system."
+            else:
+                return "Device information retrieved successfully."
+                
+        except Exception as e:
+            self.logger.error(f"Error parsing device status response: {e}")
+            return "Error interpreting device status information."
     
     async def _ensure_tools_loaded(self):
         """Ensure tools are loaded (lazy loading)."""

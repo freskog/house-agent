@@ -37,7 +37,8 @@ class AgentNode(BaseNode):
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0,
-            streaming=False
+            streaming=False,
+            max_tokens=2048  # Planning shouldn't need excessive tokens
         ).with_structured_output(AgentPlan, method="json_mode")
         
         self.logger.info(f"Agent initialized with {len(specialists)} specialists")
@@ -139,7 +140,7 @@ class AgentNode(BaseNode):
         
         if not plan:
             # No plan found, provide final response
-            return self.create_final_response(state)
+            return await self.create_final_response(state)
         
         # Determine current step index
         current_step_index = self.get_current_step_index(messages, plan)
@@ -158,7 +159,7 @@ class AgentNode(BaseNode):
             }
         else:
             # All steps completed, create final response
-            return self.create_final_response(state)
+            return await self.create_final_response(state)
     
     def extract_plan_from_messages(self, messages: List) -> Optional[AgentPlan]:
         """
@@ -218,7 +219,7 @@ class AgentNode(BaseNode):
         
         return instruction_count - 1  # Convert to 0-based index
     
-    def create_final_response(self, state: AgentState) -> AgentState:
+    async def create_final_response(self, state: AgentState) -> AgentState:
         """
         Create the final aggregated response.
         
@@ -231,8 +232,14 @@ class AgentNode(BaseNode):
         messages = state.get("messages", [])
         user_request = self.get_original_user_request(messages)
         
-        # Aggregate results using the simplified approach
-        final_response = aggregate_simple_results(messages, user_request)
+        # Check if we have search results that need summarizing
+        search_results = self._extract_search_results(messages)
+        if search_results:
+            # Use LLM to summarize search results
+            final_response = await self._summarize_search_results(search_results, user_request)
+        else:
+            # Use the simple aggregation for non-search results
+            final_response = aggregate_simple_results(messages, user_request)
         
         if final_response:
             return self.create_response(
@@ -320,6 +327,52 @@ JSON response required."""
                     execution_mode="sequential"
                 )
     
+    def _extract_search_results(self, messages: List) -> Optional[str]:
+        """Extract raw search results from messages."""
+        # Look for AIMessage with search result format
+        for message in messages:
+            if isinstance(message, AIMessage) and message.content:
+                content = message.content
+                # Check for search result patterns
+                if ("Search query:" in content and "Results:" in content) or \
+                   (content.startswith("Search query:")) or \
+                   ("1." in content and "2." in content and ("http" in content or "source" in content.lower())):
+                    self.logger.info(f"Detected raw search results, will summarize with LLM")
+                    return content
+        return None
+    
+    async def _summarize_search_results(self, search_results: str, user_request: str) -> str:
+        """Use LLM to create a user-friendly summary of search results."""
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        # Enhanced prompt for better TTS-friendly responses
+        system_prompt = f"""You are a helpful AI assistant. Today is {current_date}.
+
+The user asked: "{user_request}"
+
+Here are the search results I found:
+
+{search_results}
+
+Based on these search results, provide a clear, direct answer to the user's question. Your response should be:
+- Conversational and natural (as if speaking to a friend)
+- 1-2 sentences maximum
+- Easy to understand when spoken aloud
+- Include specific numbers/facts when available
+- No technical jargon or formatting
+
+For sleep questions, give the recommended hours clearly and simply."""
+
+        try:
+            # Use a simple LLM call for summarization
+            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=150)
+            response = await summary_llm.ainvoke([SystemMessage(content=system_prompt)])
+            return response.content if response.content else "I found some information but couldn't summarize it clearly."
+        except Exception as e:
+            self.logger.error(f"Error summarizing search results: {e}")
+            return "I found some search results but had trouble summarizing them."
+
     def should_handle_request(self, message: str) -> bool:
         """Agent handles requests when explicitly routed to it."""
         return False  # Agent is only called via routing 

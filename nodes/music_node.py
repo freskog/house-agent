@@ -140,6 +140,13 @@ class MusicNode(BaseNode):
         
         return has_music and has_non_music
     
+    async def _handle_escalation(self, user_request: str, state: AgentState) -> Dict[str, Any]:
+        """Handle escalation to agent for multi-domain requests."""
+        return self.create_escalation_response(
+            reason="Multi-domain request detected",
+            domains=["music"],
+            original_request=user_request
+        )
 
     
     async def _handle_with_function_calling(self, user_request: str, state: AgentState) -> Dict[str, Any]:
@@ -182,7 +189,7 @@ Handle the user's music request by calling the appropriate tools."""
                 tool_results = await self._execute_tool_calls(response.tool_calls, state)
                 
                 # Process results and determine response
-                response_text = self._process_tool_results(tool_results, response.tool_calls)
+                response_text = await self._process_tool_results(tool_results, response.tool_calls, user_request)
                 return self.create_response([AIMessage(content=response_text)])
             else:
                 # LLM didn't call tools, return its response
@@ -241,7 +248,7 @@ Handle the user's music request by calling the appropriate tools."""
         
         return results
     
-    def _process_tool_results(self, tool_results: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]]) -> str:
+    async def _process_tool_results(self, tool_results: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], user_request: str = "") -> str:
         """Process tool results into a human-readable response."""
         if not tool_results:
             return "No results from music tools."
@@ -250,6 +257,7 @@ Handle the user's music request by calling the appropriate tools."""
         silent_commands = []
         responses = []
         errors = []
+        raw_informational_content = []
         
         for result in tool_results:
             tool_name = result.get("tool_name", "")
@@ -265,23 +273,107 @@ Handle the user's music request by calling the appropriate tools."""
                 else:
                     responses.append(content)
             elif content:
-                # Non-silent command with content
-                responses.append(content)
+                # Check if this is informational content that could benefit from LLM summarization
+                if tool_name in ["get_current_song", "search_music", "get_spotify_devices"] and len(str(content)) > 50:
+                    raw_informational_content.append(str(content))
+                else:
+                    responses.append(content)
         
         # If there were errors, return them
         if errors:
             return " ".join(errors)
         
         # If all were successful silent commands, return empty (silent response)
-        if silent_commands and not responses:
+        if silent_commands and not responses and not raw_informational_content:
             return ""
         
-        # Return any non-silent responses
+        # Use LLM to summarize informational content if available
+        if raw_informational_content and self._is_informational_music_query(user_request):
+            try:
+                summary = await self._create_music_summary(raw_informational_content, user_request)
+                if summary:
+                    responses.append(summary)
+            except Exception as e:
+                self.logger.error(f"Error creating music summary: {e}")
+                # Fallback to original content
+                responses.extend(raw_informational_content)
+        else:
+            # Add raw content if not summarized
+            responses.extend(raw_informational_content)
+        
+        # Return any responses
         if responses:
             return " ".join(responses)
         
         # Fallback
         return "Music command completed."
+    
+    def _is_informational_music_query(self, user_request: str) -> bool:
+        """Check if the user request is asking for music information rather than performing an action."""
+        if not user_request:
+            return False
+        
+        query_lower = user_request.lower()
+        
+        # Check for question words and patterns for music info
+        info_patterns = [
+            "what's", "what is", "which", "who", "is", "are", "current", "currently",
+            "playing", "now playing", "what song", "what music", "tell me", "show me",
+            "status", "info", "information", "details", "search for", "find"
+        ]
+        
+        # Action patterns that should remain silent
+        action_patterns = [
+            "play ", "pause", "stop", "next", "previous", "skip", "volume",
+            "turn up", "turn down", "louder", "softer", "set volume"
+        ]
+        
+        # If it contains action patterns, it's not informational
+        if any(pattern in query_lower for pattern in action_patterns):
+            return False
+        
+        # If it contains info patterns, it's informational
+        return any(pattern in query_lower for pattern in info_patterns)
+    
+    async def _create_music_summary(self, raw_content: List[str], user_request: str) -> str:
+        """Create a human-readable summary of music information using LLM."""
+        if not raw_content:
+            return ""
+        
+        combined_content = "\n\n".join(raw_content)
+        
+        system_prompt = f"""You are summarizing music/Spotify information for a voice assistant.
+
+User asked: "{user_request}"
+
+Music data:
+{combined_content[:800]}
+
+Create a concise, natural response that:
+- Directly answers the user's question about music/what's playing
+- Is easy to understand when spoken aloud
+- Focuses on the most relevant information (song name, artist, album)
+- Keeps it under 2-3 sentences
+- Sounds conversational and natural
+
+If the user asked about what's playing, focus on current song/artist.
+If they searched for music, mention the results found.
+
+Response:"""
+
+        try:
+            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
+            messages = [SystemMessage(content=system_prompt)]
+            response = await summary_llm.ainvoke(messages)
+            
+            if response.content:
+                return response.content.strip()
+            else:
+                return ""
+                
+        except Exception as e:
+            self.logger.error(f"Error in music LLM summarization: {e}")
+            return ""
     
     # Legacy methods for backward compatibility
     def should_end_silently(self, state: AgentState) -> bool:

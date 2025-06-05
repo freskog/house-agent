@@ -89,6 +89,8 @@ class BaseNode(ABC):
         Determine if this specialist can handle the request completely.
         
         This replaces the complex escalation logic with a simple check.
+        With embeddings-based routing, this is mostly unused but kept
+        for compatibility.
         
         Args:
             user_request: User's request
@@ -96,21 +98,8 @@ class BaseNode(ABC):
         Returns:
             True if can handle completely, False if needs escalation
         """
-        # Default implementation - subclasses should override
-        return self.should_handle_request(user_request)
-    
-    @abstractmethod 
-    def should_handle_request(self, message: str) -> bool:
-        """
-        Determine if this node should handle the request.
-        
-        Args:
-            message: User message to evaluate
-            
-        Returns:
-            True if this node should handle the request
-        """
-        pass
+        # Default implementation - with embeddings routing, this is mostly unused
+        return True
     
     async def execute_tools_and_respond(self, user_request: str, state: AgentState) -> AIMessage:
         """

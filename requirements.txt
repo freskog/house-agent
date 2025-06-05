@@ -46,3 +46,6 @@ langchain-openai>=0.3.18
 langgraph-cli[inmem]
 # Spotify Web API
 spotipy>=2.25.1
+# Intent classification with embeddings
+sentence-transformers>=3.1.0
+scikit-learn>=1.5.0

@@ -157,6 +157,13 @@ Respond with structured output following SpecialistResponse schema."""
                 response="I'm not sure what you'd like me to help with. Could you please be more specific about what you need?"
             )
     
+    async def _handle_escalation(self, specialist_response, state: AgentState, user_request: str) -> Dict[str, Any]:
+        """Handle escalation to agent for multi-domain requests."""
+        return self.create_escalation_response(
+            reason=specialist_response.escalation_reason or "Multi-domain clarification needed",
+            domains=specialist_response.detected_domains or ["clarification"],
+            original_request=user_request
+        )
 
     
     def get_clarification_keywords(self) -> List[str]:

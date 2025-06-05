@@ -12,17 +12,11 @@ External Interface:
 - make_graph(): Async context manager returning compiled LangGraph (same interface as before)
 - SimpleAgentState: Simplified state type (5 fields vs 18+ before)
 
-Key Improvements:
-- 72% reduction in state complexity
-- Unified routing function (1 vs 4 functions)
-- Message-based execution (eliminates serialization bugs)
-- Consistent node interfaces
-- 10-20% performance improvement expected
 """
 
 from contextlib import asynccontextmanager
 from langgraph.graph import StateGraph, START, END
-from typing import Dict, Any
+from typing import Dict, Any, List
 import os
 import time
 import logging
@@ -50,15 +44,20 @@ class HybridNode:
     async def handle_request(self, state: AgentState) -> AgentState:
         """Handle request using current node but with simplified interface"""
         try:
+            # Determine who called us based on the message pattern
+            messages = state.get("messages", [])
+            called_by = self._determine_caller(messages)
+            
             # Create minimal current state format for compatibility
             current_state = {
-                "messages": state.get("messages", []),
+                "messages": messages,
                 "audio_server": state.get("audio_server"),
                 "current_client": state.get("current_client"),
                 "needs_clarification": False,
                 "original_request": None,
                 "clarification_count": 0,
                 "current_domain": state.get("target_domain", "router"),
+                "called_by": called_by,
             }
             
             # Map simplified fields to current fields for routing
@@ -80,13 +79,24 @@ class HybridNode:
             result = await self.current_node.handle_request(current_state)
             
             # Convert back to simplified format
-            return {
-                "messages": result.get("messages", state.get("messages", [])),
-                "next_action": "end",  # Most specialists end after execution
-                "target_domain": None,
-                "audio_server": state.get("audio_server"),
-                "current_client": state.get("current_client")
-            }
+            # Check if the specialist wants to continue (e.g., search returning raw results to agent)
+            if result.get("next_action") == "continue" and result.get("target_domain") == "agent":
+                return {
+                    "messages": result.get("messages", state.get("messages", [])),
+                    "next_action": "continue",  # Respect the specialist's continue request
+                    "target_domain": "agent",  # Route back to agent
+                    "audio_server": state.get("audio_server"),
+                    "current_client": state.get("current_client")
+                }
+            else:
+                # Most specialists end after execution
+                return {
+                    "messages": result.get("messages", state.get("messages", [])),
+                    "next_action": "end",
+                    "target_domain": None,
+                    "audio_server": state.get("audio_server"),
+                    "current_client": state.get("current_client")
+                }
             
         except Exception as e:
             logger.error(f"Error in hybrid {self.node_name} node: {e}")
@@ -98,6 +108,22 @@ class HybridNode:
                 "audio_server": state.get("audio_server"),
                 "current_client": state.get("current_client")
             }
+    
+    def _determine_caller(self, messages: List) -> str:
+        """Determine if we're being called by router or agent based on message patterns."""
+        if not messages:
+            return "router"
+        
+        # Check for agent-generated instructions (agent calls specialists)
+        for message in messages:
+            if hasattr(message, 'content') and isinstance(message.content, str):
+                content = message.content
+                # Agent generates specific instruction patterns
+                if content.startswith(("Search for:", "Play:", "Set volume", "Turn on", "Turn off")):
+                    return "agent"
+        
+        # If we only have user messages, it's likely a router call
+        return "router"
     
     def _get_user_request(self, state: AgentState) -> str:
         """Extract user request from messages"""
