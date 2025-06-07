@@ -332,6 +332,12 @@ class AgentInterface:
             await self.hang_up("")  # Empty string means no goodbye message
             return ""
         
+        # Check for empty response before any TTS processing
+        if not cleaned_response.strip():
+            print("Empty response - hanging up without TTS")
+            await self.hang_up("")  # Empty string means no goodbye message
+            return ""
+        
         # Split the response into sentences for streaming
         # This regex splits on sentence boundaries while preserving punctuation
         sentences = re.split(r'(?<=[.!?])\s+', cleaned_response)
@@ -340,7 +346,11 @@ class AgentInterface:
         sentences = [s for s in sentences if s.strip()]
         
         if not sentences:
-            return "I'm sorry, I couldn't process that request."
+            # Don't generate a fallback message for intentionally empty responses
+            # This prevents TTS from speaking when the agent returns an empty response
+            print("No sentences to process - hanging up without TTS")
+            await self.hang_up("")  # Empty string means no goodbye message
+            return ""
             
         print(f"Agent response has {len(sentences)} sentences for TTS")
         

@@ -28,8 +28,6 @@ from .base_node import BaseNode
 from .router_node import RouterNode
 from .agent_node import AgentNode
 
-from .node_manager import NodeManager
-
 __all__ = [
     # ACTIVE: Specialist nodes
     "MusicNode",
@@ -44,7 +42,4 @@ __all__ = [
     "AgentNode",
     "NodeResponse",
     "route_next_node",
-    
-    # ACTIVE: Utilities
-    "NodeManager",
 ] 

@@ -1075,7 +1075,7 @@ class AudioServer:
                             else:
                                 print(f"Step 3: Sending {len(audio_data)} bytes of goodbye audio")
                                 # Send the audio with hangup flag for optimized delivery
-                                await self.send_audio_playback(websocket, audio_data, is_hangup_message=True)
+                                await self.send_audio_playback(websocket, audio_data, is_hangup_message=True, is_final=True)
                                 print("Goodbye audio sent successfully")
                 except websockets.exceptions.ConnectionClosed:
                     print("Connection closed during goodbye message, continuing with cleanup")
@@ -1083,6 +1083,20 @@ class AudioServer:
                     print(f"Error sending goodbye message: {e}")
                     import traceback
                     traceback.print_exc()
+            else:
+                # If no goodbye message, send an empty audio_playback with hangup flags
+                # This tells the client to disconnect without playing any audio
+                if websocket in self.connections:
+                    try:
+                        print("Step 2: Sending empty hangup signal to client")
+                        await self.send_audio_playback(websocket, b'', is_hangup_message=True, is_final=True)
+                        print("Empty hangup signal sent successfully")
+                    except websockets.exceptions.ConnectionClosed:
+                        print("Connection closed while sending hangup signal")
+                    except Exception as e:
+                        print(f"Error sending hangup signal: {e}")
+                        import traceback
+                        traceback.print_exc()
             
             # Remove the connection from server-side tracking ONLY
             # But do NOT close the connection - let the client decide when to disconnect

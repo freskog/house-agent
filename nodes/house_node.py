@@ -31,7 +31,7 @@ class HouseNode(BaseNode):
     def __init__(self):
         """Initialize House node with lazy MCP setup and structured LLM."""
         self.ha_api_key = os.getenv("HA_API_KEY")
-        self.ha_url = os.getenv("HA_URL", "http://10.10.100.126:8123/mcp_server/sse")
+        self.ha_url = os.getenv("HA_URL")
         self.mcp_client = None
         self.homeassistant_content = None
         self._initialization_attempted = False
@@ -477,161 +477,70 @@ Respond with structured output following SpecialistResponse schema."""
         return any(indicator in content_lower for indicator in error_indicators)
     
     async def _process_tool_results(self, tool_results: List[Dict[str, Any]], user_request: str = "") -> str:
-        """Process tool results into a human-readable response."""
+        """Process tool results using LLM to generate human-readable response."""
         if not tool_results:
             return "No results from home automation tools."
         
-        responses = []
-        raw_content = []
-        has_informational_content = False
+        # Collect all tool results for LLM processing
+        all_content = []
+        errors = []
         
         for result in tool_results:
             content = result.get("content", "")
             error = result.get("error")
+            tool_name = result.get("tool_name", "unknown")
             
             if error:
-                responses.append(f"Error: {error}")
+                errors.append(f"Tool {tool_name}: {error}")
             elif content:
-                # Check if this is a Home Assistant device status response
-                processed_response = self._interpret_ha_response(content)
-                if processed_response:
-                    responses.append(processed_response)
-                    has_informational_content = True
-                else:
-                    # Check if it's a long informational response that should be summarized
-                    if len(str(content)) > 100 and self._is_informational_response(content):
-                        raw_content.append(str(content))
-                        has_informational_content = True
-                    else:
-                        responses.append(content)
+                all_content.append(f"Tool {tool_name} result: {content}")
         
-        # If we have informational content and it's a query (not an action), use LLM summarization
-        if has_informational_content and raw_content and self._is_informational_query(user_request):
-            try:
-                summary = await self._create_ha_summary(raw_content, user_request)
-                if summary:
-                    responses.append(summary)
-            except Exception as e:
-                self.logger.error(f"Error creating HA summary: {e}")
-                # Fallback to original responses
-                pass
+        # If there are errors, report them
+        if errors:
+            return f"Home automation errors: {'; '.join(errors)}"
         
-        if responses:
-            return " ".join(responses)
-        else:
-            return ""  # Silent response for successful action commands
-
-    def _interpret_ha_response(self, content: str) -> str:
-        """
-        Interpret Home Assistant tool responses and convert to human-readable format.
-        
-        Args:
-            content: Raw tool response content
-            
-        Returns:
-            Human-readable interpretation or empty string if not interpretable
-        """
-        if not content:
+        # If no content, silent success
+        if not all_content:
             return ""
         
-        try:
-            import json
-            
-            # Check if it's a JSON response with device status
-            if isinstance(content, str) and content.strip().startswith('{"') and '"result"' in content:
-                json_data = json.loads(content)
-                
-                if json_data.get("success") and "result" in json_data:
-                    result = json_data["result"]
-                    
-                    # Check if it's a device overview/status response
-                    if "Live Context: An overview" in result or "devices in this smart home" in result:
-                        return self._parse_device_status_response(result)
-                    
-            # Check for simple device control responses
-            if "turned on" in content.lower() or "turned off" in content.lower():
-                return content
-                
-                        # For other responses, try to extract meaningful information
-            if any(keyword in content.lower() for keyword in ["success", "completed", "failed", "error"]):
-                return content
-                
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            self.logger.debug(f"Could not parse HA response as JSON: {e}")
-        
-        return ""  # Return empty if we can't interpret it
-    
-    def _is_informational_query(self, user_request: str) -> bool:
-        """Check if the user request is asking for information rather than performing an action."""
-        if not user_request:
-            return False
-        
-        query_lower = user_request.lower()
-        
-        # Check for question words and patterns
-        info_patterns = [
-            "what", "how", "where", "when", "which", "who", "is", "are", "do", "does",
-            "status", "state", "check", "show", "tell me", "what's", "how's", "are the",
-            "is the", "what are", "how are", "which are"
-        ]
-        
-        # Action patterns that should remain silent
-        action_patterns = [
-            "turn on", "turn off", "switch on", "switch off", "set", "dim", "brighten",
-            "lock", "unlock", "open", "close", "start", "stop", "pause", "play"
-        ]
-        
-        # If it contains action patterns, it's not informational
-        if any(pattern in query_lower for pattern in action_patterns):
-            return False
-        
-        # If it contains info patterns, it's informational
-        return any(pattern in query_lower for pattern in info_patterns)
-    
-    def _is_informational_response(self, content: str) -> bool:
-        """Check if content appears to be informational (status/overview) rather than action confirmation."""
-        if not content:
-            return False
-        
-        content_str = str(content).lower()
-        
-        # Signs of informational content
-        info_indicators = [
-            "overview", "context", "devices", "state:", "status", "temperature:",
-            "light:", "sensor:", "available", "current", "smart home"
-        ]
-        
-        return any(indicator in content_str for indicator in info_indicators)
-    
-    async def _create_ha_summary(self, raw_content: List[str], user_request: str) -> str:
-        """Create a human-readable summary of Home Assistant responses using LLM."""
-        if not raw_content:
+        # Use LLM to interpret the results based on user request
+        return await self._create_llm_response(all_content, user_request)
+
+    async def _create_llm_response(self, tool_results: List[str], user_request: str) -> str:
+        """Use LLM to create a natural response from Home Assistant tool results."""
+        if not tool_results:
             return ""
         
-        combined_content = "\n\n".join(raw_content)
+        from datetime import datetime
+        current_date = datetime.now().strftime("%B %d, %Y")
         
-        system_prompt = f"""You are summarizing Home Assistant device information for a voice assistant.
+        # Combine all tool results
+        combined_results = "\n".join(tool_results)
+        
+        system_prompt = f"""You are a helpful home automation assistant. Today is {current_date}.
 
-User asked: "{user_request}"
+The user asked: "{user_request}"
 
-Home Assistant data:
-{combined_content[:1000]}
+Here are the results from the home automation tools:
 
-Create a concise, natural response that:
-- Directly answers the user's question about their smart home
-- Is easy to understand when spoken aloud
-- Focuses on the most relevant device states/information
-- Keeps it under 2-3 sentences
-- Sounds conversational and natural
+{combined_results}
 
-If the user asked about specific devices (lights, temperature, etc.), focus on those.
+Based on these tool results, provide a clear, natural response to the user. Your response should:
+- Directly answer their question or confirm their action
+- Be conversational and easy to understand when spoken aloud
+- Keep it to 1-2 sentences maximum
+- Include specific information when available (temperatures, states, etc.)
+- Don't mention technical details like tool names or JSON structures
+
+If the tool results show device states or temperatures, extract and present the relevant information clearly.
+If an action was performed successfully, confirm it naturally.
+If there's an error, explain it in simple terms.
 
 Response:"""
 
         try:
-            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
-            messages = [SystemMessage(content=system_prompt)]
-            response = await summary_llm.ainvoke(messages)
+            response_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
+            response = await response_llm.ainvoke([SystemMessage(content=system_prompt)])
             
             if response.content:
                 return response.content.strip()
@@ -639,52 +548,10 @@ Response:"""
                 return ""
                 
         except Exception as e:
-            self.logger.error(f"Error in HA LLM summarization: {e}")
-            return ""
-    
-    def _parse_device_status_response(self, result: str) -> str:
-        """
-        Parse a Home Assistant device status overview and extract relevant information.
-        
-        Args:
-            result: The result string containing device information
-            
-        Returns:
-            Human-readable summary of device states
-        """
-        if not result:
-            return "No device information available."
-        
-        try:
-            # Look for office lights specifically in the result
-            if "Fredrik's office ceiling light" in result:
-                # Extract the state of Fredrik's office light
-                lines = result.split('\n')
-                for i, line in enumerate(lines):
-                    if "Fredrik's office ceiling light" in line:
-                        # Look for state in the next few lines
-                        for j in range(i, min(i + 5, len(lines))):
-                            check_line = lines[j]
-                            if 'state: ' in check_line:
-                                state_val = check_line.split('state: ')[1].strip().strip("'\"")
-                                if state_val == 'on':
-                                    return "Yes, the office ceiling light is on."
-                                elif state_val == 'off':
-                                    return "No, the office ceiling light is off."
-                                elif state_val == 'unavailable':
-                                    return "The office ceiling light is currently unavailable."
-                                break
-                        break
-            
-            # If we can't find specific office light info, provide a general response
-            if 'light' in result:
-                return "Light information is available in the smart home system."
-            else:
-                return "Device information retrieved successfully."
-                
-        except Exception as e:
-            self.logger.error(f"Error parsing device status response: {e}")
-            return "Error interpreting device status information."
+            self.logger.error(f"Error generating LLM response: {e}")
+            # Fallback to simple concatenation
+            return "Home automation task completed."
+
     
     async def _ensure_tools_loaded(self):
         """Ensure tools are loaded (lazy loading)."""
