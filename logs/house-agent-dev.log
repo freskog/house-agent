@@ -1,0 +1,59 @@
+2025-06-10 21:49:03,477 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 21:50:11,183 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 21:50:11,196 - audio_agent - [32mINFO[0m - Setting C locale to prevent Whisper segfault...
+2025-06-10 21:50:11,196 - audio_agent - [32mINFO[0m - Locale set to C successfully
+2025-06-10 21:50:11,646 - house_agent - [32mINFO[0m - Configured LangChain cache
+2025-06-10 21:50:11,646 - house_agent - [32mINFO[0m - LangSmith tracing disabled
+2025-06-10 22:06:06,073 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:36:57,295 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:37:07,539 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:37:07,551 - audio_agent - [32mINFO[0m - Setting C locale to prevent Whisper segfault...
+2025-06-10 22:37:07,551 - audio_agent - [32mINFO[0m - Locale set to C successfully
+2025-06-10 22:37:07,989 - house_agent - [32mINFO[0m - Configured LangChain cache
+2025-06-10 22:37:07,989 - house_agent - [32mINFO[0m - LangSmith tracing disabled
+2025-06-10 22:38:28,161 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:38:40,505 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:38:40,517 - audio_agent - [32mINFO[0m - Setting C locale to prevent Whisper segfault...
+2025-06-10 22:38:40,517 - audio_agent - [32mINFO[0m - Locale set to C successfully
+2025-06-10 22:38:40,955 - house_agent - [32mINFO[0m - Configured LangChain cache
+2025-06-10 22:38:40,955 - house_agent - [32mINFO[0m - LangSmith tracing disabled
+2025-06-10 22:39:56,088 - test_logger - [32mINFO[0m - 🧪 Testing basic logging functionality
+2025-06-10 22:39:56,088 - test_logger - [36mDEBUG[0m - Debug message test
+2025-06-10 22:39:56,088 - test_logger - [33mWARNING[0m - Warning message test
+2025-06-10 22:39:56,088 - test_logger - [31mERROR[0m - Error message test
+2025-06-10 22:41:03,992 - test_logger - [32mINFO[0m - 🧪 Testing basic logging functionality
+2025-06-10 22:41:03,992 - test_logger - [36mDEBUG[0m - Debug message test
+2025-06-10 22:41:03,992 - test_logger - [33mWARNING[0m - Warning message test
+2025-06-10 22:41:03,992 - test_logger - [31mERROR[0m - Error message test
+2025-06-10 22:41:23,512 - test_logger - [32mINFO[0m - 🧪 Testing basic logging functionality
+2025-06-10 22:41:23,512 - test_logger - [36mDEBUG[0m - Debug message test
+2025-06-10 22:41:23,512 - test_logger - [33mWARNING[0m - Warning message test
+2025-06-10 22:41:23,512 - test_logger - [31mERROR[0m - Error message test
+2025-06-10 22:41:49,462 - test_logger - [32mINFO[0m - 🧪 Testing basic logging functionality
+2025-06-10 22:41:49,462 - test_logger - [36mDEBUG[0m - Debug message test
+2025-06-10 22:41:49,462 - test_logger - [33mWARNING[0m - Warning message test
+2025-06-10 22:41:49,462 - test_logger - [31mERROR[0m - Error message test
+2025-06-10 22:41:49,733 - utils.metrics - [32mINFO[0m - ⚡ test_timer completed in 55.04ms
+2025-06-10 22:41:49,733 - utils.metrics - [32mINFO[0m - ⏱️ transcription completed in 250.50ms
+2025-06-10 22:41:49,733 - utils.metrics - [32mINFO[0m - ⏱️ tts_streaming completed in 180.20ms
+2025-06-10 22:41:49,733 - utils.metrics - [32mINFO[0m - ⏱️ tool_execution completed in 120.70ms
+2025-06-10 22:41:51,949 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:41:51,962 - audio_agent - [32mINFO[0m - Setting C locale to prevent Whisper segfault...
+2025-06-10 22:41:51,962 - audio_agent - [32mINFO[0m - Locale set to C successfully
+2025-06-10 22:41:52,400 - house_agent - [32mINFO[0m - Configured LangChain cache
+2025-06-10 22:41:52,400 - house_agent - [32mINFO[0m - LangSmith tracing disabled
+2025-06-10 22:42:09,808 - root - [32mINFO[0m - Development logging test
+2025-06-10 22:42:09,808 - root - [32mINFO[0m - Production logging test
+2025-06-10 22:42:09,808 - root - [33mWARNING[0m - Testing logging test
+2025-06-10 22:42:25,290 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:42:46,902 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:42:47,566 - audio.client.simple_client.SimpleAudioClient - [32mINFO[0m - 🎧 Audio client initialized for server: ws://localhost:8765
+2025-06-10 22:43:01,607 - final_test - [36mDEBUG[0m - Debug test
+2025-06-10 22:43:01,607 - final_test - [32mINFO[0m - Info test - normal operation
+2025-06-10 22:43:01,607 - final_test - [33mWARNING[0m - Warning test - attention needed
+2025-06-10 22:43:01,607 - final_test - [31mERROR[0m - Error test - something went wrong
+2025-06-10 22:45:27,100 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:49:33,800 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:53:32,048 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:56:50,315 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False
+2025-06-10 22:58:04,502 - audio.server.websocket - [36mDEBUG[0m - LangSmith module imported successfully, tracing enabled: False

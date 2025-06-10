@@ -1,6 +1,12 @@
 from typing import Optional
 from .tts import TTSEngine
 
+# Import our logging infrastructure
+from utils.logging_config import setup_logging
+
+# Set up logger for this module
+logger = setup_logging(__name__)
+
 class CallbackRegistry:
     """Registry for callbacks"""
     def __init__(self):
@@ -45,7 +51,7 @@ class AudioServer:
     def log(self, message):
         """Log a message"""
         if self.debug:
-            print(f"[AudioServer] {message}")
+            logger.debug(f"[AudioServer] {message}")
         
     def register_default_callbacks(self):
         """Register default callbacks"""

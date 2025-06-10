@@ -25,16 +25,27 @@ import sys
 from langchain_core.messages import HumanMessage, AIMessage
 from langsmith import traceable
 
+# Import logging and metrics infrastructure
+from utils import get_logger, timing_decorator, log_performance
+from utils.metrics import (
+    log_agent_performance, log_transcription_performance, 
+    log_tts_performance, start_timer, end_timer, TimerContext,
+    OperationType
+)
+
+# Initialize logging
+logger = get_logger(__name__)
+
 # Set C locale to avoid Whisper segmentation fault on systems with non-C locales
 try:
-    print("Setting C locale to prevent Whisper segfault...")
+    logger.info("Setting C locale to prevent Whisper segfault...")
     locale.setlocale(locale.LC_ALL, 'C')
     os.environ['LC_ALL'] = 'C'
     os.environ['LANG'] = 'C'
     os.environ['LANGUAGE'] = 'C'
-    print("Locale set to C successfully")
+    logger.info("Locale set to C successfully")
 except Exception as e:
-    print(f"Warning: Could not set locale to C: {e}")
+    logger.warning(f"Could not set locale to C: {e}")
 
 # Import the agent modules
 from agent import make_graph, AgentState
@@ -136,6 +147,7 @@ class AgentInterface:
     """Interface between the audio server and the agent"""
     
     def __init__(self):
+        self.logger = get_logger(f"{__name__}.AgentInterface")
         self.graph = None
         self.graph_ctx = None
         self.last_response_time = 0
@@ -153,11 +165,12 @@ class AgentInterface:
         self._loop_count = 0
         self._is_agent_initialized = False  # Track if the agent is fully initialized
         
+    @timing_decorator(OperationType.INITIALIZATION.value)
     async def initialize(self):
         """Initialize the agent graph"""
         try:
             # Eagerly initialize the graph at startup
-            print("Initializing agent graph...")
+            self.logger.info("Initializing agent graph...")
             start_time = time.time()
             self.graph_ctx = make_graph()
             
@@ -167,17 +180,22 @@ class AgentInterface:
             except TypeError as e:
                 # If there's a TypeError, it might be related to cache_seed or other parameters
                 # being passed incorrectly. Let's log it but continue
-                print(f"Warning: Agent initialization had TypeError: {e}")
-                print("Continuing with initialization despite the warning...")
+                self.logger.warning(f"Agent initialization had TypeError: {e}")
+                self.logger.info("Continuing with initialization despite the warning...")
                 
             # Mark initialization as complete
             self._is_agent_initialized = True
 
             elapsed = time.time() - start_time
-            print(f"Agent interface initialized successfully in {elapsed:.2f} seconds")
+            log_performance(
+                OperationType.INITIALIZATION.value, 
+                elapsed * 1000, 
+                {"component": "agent_interface", "success": True}
+            )
+            self.logger.info(f"Agent interface initialized successfully in {elapsed:.2f} seconds")
             return True
         except Exception as e:
-            print(f"Error initializing agent: {e}")
+            self.logger.error(f"Error initializing agent: {e}")
             return False
             
     def set_audio_server(self, server, client=None):
@@ -187,13 +205,20 @@ class AgentInterface:
             self.current_client = client
             if hasattr(client, 'remote_address'):
                 self._last_client_address = client.remote_address
-                print(f"Client reference set: {self._last_client_address}")
+                self.logger.debug(f"Client reference set: {self._last_client_address}")
             else:
-                print("Client reference set but no remote_address attribute")
+                self.logger.debug("Client reference set but no remote_address attribute")
     
     @traceable(run_type="chain", name="Agent_Process_Transcription")
     async def process_transcription(self, transcription: TranscriptionResult) -> str:
         """Process transcription through the agent"""
+        # Start timing for end-to-end agent processing
+        timer = TimerContext(OperationType.AGENT_TOTAL.value, {
+            "transcription_text": transcription.text[:50],
+            "transcription_confidence": transcription.confidence,
+            "transcription_duration": transcription.duration
+        }).start()
+        
         # Store the current client from the websocket server context
         # Don't rely on the transcription.client as it's not serializable
         current_client = None
@@ -207,16 +232,16 @@ class AgentInterface:
                 client_state = self.audio_server.client_states.get(current_client)
                 if client_state and hasattr(client_state, 'thread_id'):
                     thread_id = client_state.thread_id
-                    print(f"Using thread_id from client state: {thread_id}")
+                    self.logger.debug(f"Using thread_id from client state: {thread_id}")
             
             # Update our client reference for hang-up functionality
             if current_client != self.current_client:
                 self.current_client = current_client
                 if hasattr(current_client, 'remote_address'):
                     self._last_client_address = current_client.remote_address
-                    print(f"Updated client reference: {self._last_client_address}")
+                    self.logger.debug(f"Updated client reference: {self._last_client_address}")
                 else:
-                    print("Updated client reference but no remote_address attribute")
+                    self.logger.debug("Updated client reference but no remote_address attribute")
         
         # Send an immediate acknowledgement tone if audio server is available
         client_to_use = current_client or self.current_client
@@ -226,7 +251,7 @@ class AgentInterface:
                 # This creates perception of immediate responsiveness
                 await self.audio_server.send_processing_indicator(client_to_use)
             except Exception as e:
-                print(f"Error sending processing indicator: {e}")
+                self.logger.warning(f"Error sending processing indicator: {e}")
             
         # Add the new user message to conversation history
         user_message = HumanMessage(content=transcription.text)
@@ -247,18 +272,29 @@ class AgentInterface:
         )
         
         # Process the input and get response - measure response time
-        start_time = time.time()
+        timer.checkpoint("conversation_setup")
+        graph_start_time = start_timer()
         
         # Pass thread_id to ainvoke if available
         if thread_id:
-            print(f"Invoking graph with thread_id: {thread_id}")
+            self.logger.debug(f"Invoking graph with thread_id: {thread_id}")
             result = await self.graph.ainvoke(input_state, config={"thread_id": thread_id})
         else:
-            print("Invoking graph without thread_id")
+            self.logger.debug("Invoking graph without thread_id")
             result = await self.graph.ainvoke(input_state)
             
-        elapsed = time.time() - start_time
-        print(f"Agent processing completed in {elapsed:.2f} seconds")
+        graph_duration = end_timer(graph_start_time)
+        log_performance(
+            "graph_execution", 
+            graph_duration, 
+            {
+                "thread_id": thread_id,
+                "message_count": len(input_state["messages"]),
+                "has_history": len(self.client_conversation_history.get(current_client, [])) > 1
+            }
+        )
+        self.logger.info(f"⚡ Agent graph processing completed in {graph_duration:.2f}ms")
+        timer.checkpoint("graph_execution")
 
         # Check if the graph has ended (reached the END node)
         # This is determined by examining the result structure
@@ -275,9 +311,9 @@ class AgentInterface:
                     response_content = last_message.content.strip()
                     if not response_content.endswith('?'):
                         graph_has_ended = True
-                        print("Graph has reached the END node - will hang up silently after response")
+                        self.logger.debug("Graph has reached the END node - will hang up silently after response")
                     else:
-                        print("Graph has reached END node but response ends with a question - will NOT hang up")
+                        self.logger.debug("Graph has reached END node but response ends with a question - will NOT hang up")
 
         # Extract the text response from structured output
         response_text = ""
@@ -289,7 +325,8 @@ class AgentInterface:
 
         # Clean the response for TTS
         cleaned_response = clean_text_for_tts(response_text.strip())
-        print(f"Original response length: {len(response_text)}, Cleaned response length: {len(cleaned_response)}")
+        self.logger.debug(f"Response cleaning: {len(response_text)} → {len(cleaned_response)} chars")
+        timer.checkpoint("response_cleaning")
         
         # Add the agent's response to conversation history
         if current_client not in self.client_conversation_history:
@@ -300,15 +337,15 @@ class AgentInterface:
         # Only treat as silent if it's a music control command that succeeded
         is_silent_music_response = False
         if graph_has_ended and not cleaned_response.strip():
-            print(f"DEBUG: Checking for silent music response. Messages count: {len(result['messages']) if result and 'messages' in result else 0}")
+            self.logger.debug(f"Checking for silent music response. Messages count: {len(result['messages']) if result and 'messages' in result else 0}")
             # Check if the last AI message before this one had a music control tool call
             if result and "messages" in result and len(result["messages"]) >= 2:
-                print("DEBUG: Searching for music control tool calls in message history")
+                self.logger.debug("Searching for music control tool calls in message history")
                 # Look for the second-to-last message (should be an AI message with tool calls)
                 for i, msg in enumerate(reversed(result["messages"][:-1])):  # Skip the last (current) message
-                    print(f"DEBUG: Message {i}: type={type(msg).__name__}, has_tool_calls={hasattr(msg, 'tool_calls')}")
+                    self.logger.debug(f"Message {i}: type={type(msg).__name__}, has_tool_calls={hasattr(msg, 'tool_calls')}")
                     if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                        print(f"DEBUG: Found message with {len(msg.tool_calls)} tool calls")
+                        self.logger.debug(f"Found message with {len(msg.tool_calls)} tool calls")
                         for tool_call in msg.tool_calls:
                             # Handle both attribute and dictionary access for tool_call name
                             tool_name = ''
@@ -319,22 +356,24 @@ class AgentInterface:
                             elif hasattr(tool_call, 'get'):
                                 tool_name = tool_call.get('name', '')
                             
-                            print(f"DEBUG: Tool call: {tool_name} (type: {type(tool_call).__name__})")
+                            self.logger.debug(f"Tool call: {tool_name} (type: {type(tool_call).__name__})")
                             if tool_name in ["play_music", "pause_music", "stop_music", "next_track", "previous_track", "set_volume"]:
-                                print(f"Detected successful music control command '{tool_name}' with empty response - this is intentionally silent")
+                                self.logger.info(f"🎵 Detected successful music control command '{tool_name}' with empty response - this is intentionally silent")
                                 is_silent_music_response = True
                                 break
                         if is_silent_music_response:
                             break
         
         if is_silent_music_response:
-            print("Silent music command response - hanging up without TTS")
+            self.logger.info("🔇 Silent music command response - hanging up without TTS")
+            timer.end()  # End timing before hanging up
             await self.hang_up("")  # Empty string means no goodbye message
             return ""
         
         # Check for empty response before any TTS processing
         if not cleaned_response.strip():
-            print("Empty response - hanging up without TTS")
+            self.logger.info("🔇 Empty response - hanging up without TTS")
+            timer.end()  # End timing before hanging up
             await self.hang_up("")  # Empty string means no goodbye message
             return ""
         
@@ -348,11 +387,13 @@ class AgentInterface:
         if not sentences:
             # Don't generate a fallback message for intentionally empty responses
             # This prevents TTS from speaking when the agent returns an empty response
-            print("No sentences to process - hanging up without TTS")
+            self.logger.info("🔇 No sentences to process - hanging up without TTS")
+            timer.end()  # End timing before hanging up
             await self.hang_up("")  # Empty string means no goodbye message
             return ""
             
-        print(f"Agent response has {len(sentences)} sentences for TTS")
+        self.logger.info(f"🎤 Agent response has {len(sentences)} sentences for TTS")
+        timer.checkpoint("tts_preparation")
         
         # Process each sentence with TTS and send it to the client
         client_to_use = current_client or self.current_client
@@ -360,23 +401,37 @@ class AgentInterface:
         if self.audio_server and client_to_use:
             try:
                 # Use the audio server's streaming TTS feature directly
-                print(f"Using audio server streaming TTS for response")
-                start_time = time.time()
+                self.logger.info("🔊 Starting TTS streaming for response")
+                tts_start_time = start_timer()
                 
                 # Stream the cleaned response directly through the server's streaming TTS
                 success = await self.audio_server.text_to_speech_streaming(cleaned_response, client_to_use)
                 
                 if success:
-                    total_time = time.time() - start_time
-                    print(f"TTS streaming completed in {total_time:.2f}s")
+                    tts_duration = end_timer(tts_start_time)
+                    log_tts_performance(
+                        text_length=len(cleaned_response),
+                        generation_duration_ms=tts_duration,
+                        streaming=True
+                    )
+                    self.logger.info(f"⚡ TTS streaming completed in {tts_duration:.2f}ms")
+                    timer.checkpoint("tts_streaming")
                 else:
-                    print(f"TTS streaming failed, falling back to server's non-streaming TTS")
+                    self.logger.warning("TTS streaming failed, falling back to non-streaming TTS")
                     # Let the server handle the fallback to non-streaming TTS
                     audio_data = await self.audio_server.text_to_speech(cleaned_response)
                     if audio_data:
                         await self.audio_server.send_audio_playback(client_to_use, audio_data)
+                        fallback_duration = end_timer(tts_start_time)
+                        log_tts_performance(
+                            text_length=len(cleaned_response),
+                            generation_duration_ms=fallback_duration,
+                            audio_size_bytes=len(audio_data),
+                            streaming=False
+                        )
+                        timer.checkpoint("tts_fallback")
                     else:
-                        print("Both streaming and non-streaming TTS failed")
+                        self.logger.error("Both streaming and non-streaming TTS failed")
                 
                 # If the graph has reached its end node, hang up silently after sending the response
                 # NOTE: Silent responses (empty content) are now handled earlier in the function
@@ -385,23 +440,27 @@ class AgentInterface:
                     # Double-check that the cleaned response doesn't end with a question mark
                     # as TTS cleaning might have modified the content
                     if not cleaned_response.strip().endswith('?'):
-                        print("Hanging up silently as graph has reached the END node (after response)")
+                        self.logger.info("🔚 Hanging up silently as graph has reached the END node (after response)")
+                        timer.end()  # End timing before hanging up
                         await self.hang_up("")  # Empty string means no goodbye message
                         return ""
                     else:
-                        print("Not hanging up as final response ends with a question")
+                        self.logger.debug("Not hanging up as final response ends with a question")
                                 
             except Exception as e:
-                print(f"Error streaming TTS: {e}")
+                self.logger.error(f"Error streaming TTS: {e}")
+                timer.end()  # End timing before returning error
                 import traceback
                 traceback.print_exc()
                 return "Error generating speech."
                 
             # Return empty string since we've handled the audio streaming ourselves
+            timer.end()  # End timing for successful completion
             return ""
         else:
             # If no audio server, just return the text
-            print("No audio server reference or client, returning full response")
+            self.logger.warning("No audio server reference or client, returning full response")
+            timer.end()  # End timing before returning
             return cleaned_response
 
     async def cleanup(self):
@@ -411,8 +470,9 @@ class AgentInterface:
                 await self.graph_ctx.__aexit__(None, None, None)
                 self.graph = None
                 self.graph_ctx = None
+                self.logger.info("Agent resources cleaned up successfully")
             except Exception as e:
-                print(f"Error cleaning up agent: {e}")
+                self.logger.error(f"Error cleaning up agent: {e}")
                 
     async def hang_up(self, reason: str = "") -> str:
         """Hang up the call with the current client
@@ -424,30 +484,30 @@ class AgentInterface:
         Returns:
             str: A message indicating success or failure
         """
-        print(f"Hang up requested with reason: '{reason}'")
+        self.logger.debug(f"Hang up requested with reason: '{reason}'")
         
         if not self.audio_server:
-            print("No audio server available")
+            self.logger.warning("No audio server available for hang up")
             return "Failed to hang up: No audio server available"
             
         client_to_use = self.current_client
         if not client_to_use:
-            print(f"No active client connection (last known client: {self._last_client_address})")
+            self.logger.warning(f"No active client connection (last known client: {self._last_client_address})")
             return "Failed to hang up: No active client connection"
             
         # Use the audio server's hang_up method which now supports streaming TTS
         try:
             success = await self.audio_server.hang_up(client_to_use, reason)
             if success:
-                print(f"Hang up successful for client {self._last_client_address}")
+                self.logger.info(f"📞 Hang up successful for client {self._last_client_address}")
                 # Clear our client reference after successful hang up
                 self.current_client = None
                 return "Call ended successfully"
             else:
-                print(f"Hang up failed: Audio server reported failure")
+                self.logger.warning("Hang up failed: Audio server reported failure")
                 return "Failed to hang up the call: Audio server error"
         except Exception as e:
-            print(f"Hang up failed with exception: {e}")
+            self.logger.error(f"Hang up failed with exception: {e}")
             import traceback
             traceback.print_exc()
             return f"Failed to hang up the call: {e}"
@@ -455,7 +515,7 @@ class AgentInterface:
     async def cleanup_client(self, client):
         """Clean up resources for a specific client"""
         if client in self.client_conversation_history:
-            print(f"Cleaning up conversation history for client {getattr(client, 'remote_address', 'unknown')}")
+            self.logger.debug(f"Cleaning up conversation history for client {getattr(client, 'remote_address', 'unknown')}")
             del self.client_conversation_history[client]
             
         # If this was the current client, clear that reference
@@ -463,11 +523,12 @@ class AgentInterface:
             self.current_client = None
             self._last_client_address = None
 
+@timing_decorator(OperationType.INITIALIZATION.value)
 async def main(args):
     """Main entry point"""
     try:
-        print(f"Starting Audio Agent v2.0 (Optimized for low latency)")
-        start_time = time.time()
+        logger.info("🚀 Starting Audio Agent v2.0 (Optimized for low latency)")
+        startup_timer = TimerContext("startup_sequence", {"version": "v2.0"}).start()
         
         # Create VAD config with custom threshold
         vad_config = VADConfig(
@@ -489,15 +550,17 @@ async def main(args):
         )
         
         # Create and initialize agent interface
-        print("\n1. Initializing agent interface...")
+        logger.info("📊 1. Initializing agent interface...")
+        startup_timer.checkpoint("config_complete")
         agent_interface = AgentInterface()
         init_success = await agent_interface.initialize()
         if not init_success:
-            print("Failed to initialize agent. Exiting.")
+            logger.error("Failed to initialize agent. Exiting.")
             return
+        startup_timer.checkpoint("agent_initialized")
         
         # Create server - this will eagerly initialize all components
-        print(f"\n2. Starting audio server with {args.model} model on {args.device}...")
+        logger.info(f"🎙️ 2. Starting audio server with {args.model} model on {args.device}...")
         server = AudioServer(
             host=args.host,
             port=args.port,
@@ -509,6 +572,7 @@ async def main(args):
         
         # Set the server reference in the agent interface
         agent_interface.set_audio_server(server)
+        startup_timer.checkpoint("server_created")
         
         # Create a shutdown event
         shutdown_event = asyncio.Event()
@@ -517,7 +581,7 @@ async def main(args):
         loop = asyncio.get_running_loop()
         
         def signal_handler():
-            print("Shutdown signal received")
+            logger.info("🛑 Shutdown signal received")
             shutdown_event.set()
         
         for s in [signal.SIGINT, signal.SIGTERM]:
@@ -525,11 +589,12 @@ async def main(args):
         
         # Start server
         await server.start()
+        startup_timer.checkpoint("server_started")
         
-        total_startup_time = time.time() - start_time
-        print(f"\nAudio agent ready! Startup completed in {total_startup_time:.2f} seconds")
-        print(f"Server running on ws://{args.host}:{args.port}")
-        print("Press Ctrl+C to stop")
+        total_startup_time = startup_timer.end()
+        logger.info(f"✅ Audio agent ready! Startup completed in {total_startup_time:.2f}ms")
+        logger.info(f"🌐 Server running on ws://{args.host}:{args.port}")
+        logger.info("Press Ctrl+C to stop")
         
         # Setup command processing
         async def process_command():
@@ -538,15 +603,15 @@ async def main(args):
                 cmd = await loop.run_in_executor(None, input, "\nAdmin command (or press Enter to skip): ")
                 
                 if cmd.lower() == "exit" or cmd.lower() == "quit":
-                    print("Exiting...")
+                    logger.info("Admin command: Exiting...")
                     shutdown_event.set()
                     break
                 elif cmd.lower() == "status":
-                    print("\nStatus:")
-                    print(f"- Audio server running: yes")
-                    print(f"- Agent initialized: {agent_interface._is_agent_initialized}")
-                    print(f"- Current client: {agent_interface._last_client_address or 'None'}")
-                    print(f"- Conversation history size: {len(agent_interface.client_conversation_history.get(agent_interface.current_client, [])) if agent_interface.current_client else 'None'} messages")
+                    logger.info("\n📊 Status:")
+                    logger.info(f"- Audio server running: yes")
+                    logger.info(f"- Agent initialized: {agent_interface._is_agent_initialized}")
+                    logger.info(f"- Current client: {agent_interface._last_client_address or 'None'}")
+                    logger.info(f"- Conversation history size: {len(agent_interface.client_conversation_history.get(agent_interface.current_client, [])) if agent_interface.current_client else 'None'} messages")
                 
                 await asyncio.sleep(0.1)  # Reduced sleep time
         
@@ -559,14 +624,14 @@ async def main(args):
         async def patched_handle_connection(websocket):
             # Store the client reference in the agent interface, but directly, not through serializable state
             agent_interface.current_client = websocket
-            print(f"Client connected: {websocket.remote_address}")
+            logger.info(f"🔗 Client connected: {websocket.remote_address}")
             
             try:
                 # Call the original method
                 await original_handle_connection(websocket)
             finally:
                 # Clean up client resources when connection ends
-                print(f"Client disconnected: {websocket.remote_address}")
+                logger.info(f"📞 Client disconnected: {websocket.remote_address}")
                 await agent_interface.cleanup_client(websocket)
         
         # Replace the method
@@ -584,21 +649,22 @@ async def main(args):
             await cleanup(server, agent_interface)
         
     except Exception as e:
-        print(f"Error starting audio agent: {e}")
+        logger.error(f"Error starting audio agent: {e}")
         sys.exit(1)
 
 async def cleanup(server, agent_interface):
     """Cleanup resources"""
-    print("Shutting down server...")
+    logger.info("🧹 Shutting down server...")
     try:
         await server.stop()
+        logger.info("Server stopped successfully")
     except Exception as e:
-        print(f"Error stopping server: {e}")
+        logger.error(f"Error stopping server: {e}")
     
     try:
         await agent_interface.cleanup()
     except Exception as e:
-        print(f"Error cleaning up agent: {e}")
+        logger.error(f"Error cleaning up agent: {e}")
     
     # Be more careful with task cancellation to avoid recursion
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -609,7 +675,7 @@ async def cleanup(server, agent_interface):
             if not task.done():
                 task.cancel()
         except Exception as e:
-            print(f"Error cancelling task: {e}")
+            logger.debug(f"Error cancelling task: {e}")
     
     # Wait for tasks with a timeout
     try:
@@ -618,15 +684,17 @@ async def cleanup(server, agent_interface):
             asyncio.gather(*tasks, return_exceptions=True),
             timeout=5.0
         )
+        logger.debug("All tasks completed successfully")
     except asyncio.TimeoutError:
-        print("Some tasks did not complete within timeout")
+        logger.warning("Some tasks did not complete within timeout")
     except Exception as e:
-        print(f"Error waiting for tasks to complete: {e}")
+        logger.warning(f"Error waiting for tasks to complete: {e}")
     
     try:
         asyncio.get_event_loop().stop()
+        logger.debug("Event loop stopped")
     except Exception as e:
-        print(f"Error stopping event loop: {e}")
+        logger.error(f"Error stopping event loop: {e}")
 
 if __name__ == "__main__":
     # Parse command line arguments
@@ -663,7 +731,7 @@ if __name__ == "__main__":
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
     
     try:
-        print("Starting Audio Agent with optimized latency settings...")
+        logger.info("🎯 Starting Audio Agent with optimized latency settings...")
         asyncio.run(main(args))
     except KeyboardInterrupt:
-        print("Server stopped by user") 
+        logger.info("🛑 Server stopped by user") 

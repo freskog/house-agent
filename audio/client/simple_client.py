@@ -19,7 +19,16 @@ import time
 import argparse
 import queue
 
+# Add logging infrastructure
+from utils.logging_config import setup_logging
+from utils.metrics import timing_decorator, TimerContext, start_timer, end_timer
+from utils.config import get_config
+
+# Module-level logger
+logger = setup_logging(__name__)
+
 class SimpleAudioClient:
+    @timing_decorator()
     def __init__(self, server_url="ws://localhost:8765"):
         """Initialize audio client"""
         self.server_url = server_url
@@ -32,6 +41,9 @@ class SimpleAudioClient:
         self.sequence = 0  # Counter for message sequencing
         self.tool_active = False  # Track if a tool is currently active
         self.current_tool = None  # Track the currently active tool
+        
+        # Setup logger for this instance
+        self.logger = setup_logging(f"{__name__}.{self.__class__.__name__}")
         
         # Audio configuration
         self.channels = 1  # Mono
@@ -47,60 +59,70 @@ class SimpleAudioClient:
             from scipy import signal
             self.has_signal = True
         except ImportError:
-            print("scipy.signal not available, audio resampling will be limited")
+            self.logger.warning("scipy.signal not available, audio resampling will be limited")
             self.has_signal = False
+            
+        self.logger.info(f"🎧 Audio client initialized for server: {server_url}")
         
     async def connect(self):
         """Connect to server and initialize audio devices"""
-        try:
-            # Connect to WebSocket server
-            print(f"Connecting to {self.server_url}...")
-            self.websocket = await websockets.connect(self.server_url)
-            print("Connected to server")
-            
-            # Initialize PyAudio
-            self.pyaudio = pyaudio.PyAudio()
-            
-            # Set up microphone input stream
-            print("Initializing microphone...")
-            self.mic_stream = self.pyaudio.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.mic_sample_rate,
-                input=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            # Set up speaker output stream
-            print("Initializing speaker...")
-            self.speaker_stream = self.pyaudio.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.speaker_sample_rate,
-                output=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            print("Audio devices initialized")
-            return True
-            
-        except Exception as e:
-            print(f"Connection failed: {e}")
-            if self.websocket:
-                await self.websocket.close()
-            self.cleanup()
-            return False
+        with TimerContext("client_connection") as timer:
+            try:
+                # Connect to WebSocket server
+                self.logger.info(f"🔗 Connecting to {self.server_url}...")
+                timer.checkpoint("websocket_start")
+                
+                self.websocket = await websockets.connect(self.server_url)
+                timer.checkpoint("websocket_connected")
+                self.logger.info("🔗 Connected to server")
+                
+                # Initialize PyAudio
+                self.pyaudio = pyaudio.PyAudio()
+                timer.checkpoint("pyaudio_initialized")
+                
+                # Set up microphone input stream
+                self.logger.debug("🎤 Initializing microphone...")
+                self.mic_stream = self.pyaudio.open(
+                    format=pyaudio.paInt16,
+                    channels=self.channels,
+                    rate=self.mic_sample_rate,
+                    input=True,
+                    frames_per_buffer=self.chunk_size
+                )
+                timer.checkpoint("microphone_initialized")
+                
+                # Set up speaker output stream
+                self.logger.debug("🔊 Initializing speaker...")
+                self.speaker_stream = self.pyaudio.open(
+                    format=pyaudio.paInt16,
+                    channels=self.channels,
+                    rate=self.speaker_sample_rate,
+                    output=True,
+                    frames_per_buffer=self.chunk_size
+                )
+                timer.checkpoint("speaker_initialized")
+                
+                connection_time = timer.end()
+                self.logger.info(f"🎧 Audio devices initialized in {connection_time:.2f}ms")
+                return True
+                
+            except Exception as e:
+                self.logger.error(f"❌ Connection failed: {e}")
+                if self.websocket:
+                    await self.websocket.close()
+                self.cleanup()
+                return False
     
     def cleanup(self):
         """Clean up resources"""
-        print("Cleaning up audio resources...")
+        self.logger.debug("🧹 Cleaning up audio resources...")
             
         if self.mic_stream:
             try:
                 self.mic_stream.stop_stream()
                 self.mic_stream.close()
             except Exception as e:
-                print(f"Error closing mic stream: {e}")
+                self.logger.warning(f"Error closing mic stream: {e}")
             finally:
                 self.mic_stream = None
             
@@ -109,7 +131,7 @@ class SimpleAudioClient:
                 self.speaker_stream.stop_stream()
                 self.speaker_stream.close()
             except Exception as e:
-                print(f"Error closing speaker stream: {e}")
+                self.logger.warning(f"Error closing speaker stream: {e}")
             finally:
                 self.speaker_stream = None
             
@@ -117,15 +139,15 @@ class SimpleAudioClient:
             try:
                 self.pyaudio.terminate()
             except Exception as e:
-                print(f"Error terminating PyAudio: {e}")
+                self.logger.warning(f"Error terminating PyAudio: {e}")
             finally:
                 self.pyaudio = None
         
-        print("Audio resources cleaned up")
+        self.logger.info("🧹 Audio resources cleaned up")
     
     async def disconnect(self):
         """Disconnect from server and clean up"""
-        print("Disconnecting from server...")
+        self.logger.info("🔌 Disconnecting from server...")
         
         try:
             if self.websocket and not (hasattr(self.websocket, 'closed') and self.websocket.closed):
@@ -141,21 +163,21 @@ class SimpleAudioClient:
                     }
                     self.sequence += 1
                     await self.websocket.send(json.dumps(message))
-                    print("Sent disconnect message")
+                    self.logger.debug("Sent disconnect message")
                 except Exception as e:
-                    print(f"Error sending disconnect message: {e}")
+                    self.logger.warning(f"Error sending disconnect message: {e}")
                 
                 # Close the websocket
                 try:
                     await self.websocket.close()
                 except Exception as e:
-                    print(f"Error closing websocket: {e}")
+                    self.logger.warning(f"Error closing websocket: {e}")
         except Exception as e:
-            print(f"Error during disconnect: {e}")
+            self.logger.error(f"Error during disconnect: {e}")
         finally:
             self.websocket = None
             
-        print("Disconnected from server")
+        self.logger.info("🔌 Disconnected from server")
             
     async def run(self):
         """Run the client"""
@@ -164,12 +186,12 @@ class SimpleAudioClient:
             
         self.running = True
         
-        print("\n========== EDGE DEVICE SIMULATOR ==========")
-        print("Streaming microphone audio to server...")
-        print("Receiving audio will play through speakers")
-        print("\n⚠️  IMPORTANT: Use headphones to prevent echo!")
-        print("==========================================")
-        print("Press Ctrl+C to exit\n")
+        self.logger.info("\n========== EDGE DEVICE SIMULATOR ==========")
+        self.logger.info("Streaming microphone audio to server...")
+        self.logger.info("Receiving audio will play through speakers")
+        self.logger.info("\n⚠️  IMPORTANT: Use headphones to prevent echo!")
+        self.logger.info("==========================================")
+        self.logger.info("Press Ctrl+C to exit\n")
         
         # Start the send and receive loops
         try:
@@ -196,20 +218,20 @@ class SimpleAudioClient:
             try:
                 await asyncio.wait_for(asyncio.gather(send_task, receive_task, return_exceptions=True), timeout=2.0)
             except asyncio.TimeoutError:
-                print("Some tasks did not terminate gracefully")
+                self.logger.warning("Some tasks did not terminate gracefully")
                 
         except asyncio.CancelledError:
-            print("Tasks cancelled")
+            self.logger.warning("Tasks cancelled")
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            self.logger.error(f"Error in main loop: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            print("Client shutting down...")
+            self.logger.debug("Client shutting down...")
             self.running = False
             await self.disconnect()
             self.cleanup()
-            print("Client shutdown complete")
+            self.logger.info("Client shutdown complete")
             
     async def send_audio_loop(self):
         """Continuously read from microphone and send to server"""
@@ -217,13 +239,13 @@ class SimpleAudioClient:
             while self.running and self.websocket:
                 # If we're hanging up, stop sending audio
                 if self.hanging_up:
-                    print("Hanging up - stopped sending audio")
+                    self.logger.info("Hanging up - stopped sending audio")
                     self.running = False  # Set running to false to trigger client shutdown
                     break
                     
                 # Check if the websocket is closed
                 if hasattr(self.websocket, 'closed') and self.websocket.closed:
-                    print("WebSocket connection closed - stopped sending audio")
+                    self.logger.info("WebSocket connection closed - stopped sending audio")
                     break
                     
                 # Read audio data from microphone
@@ -236,7 +258,7 @@ class SimpleAudioClient:
                     
                     # Only warn if audio level is very low and not too frequently
                     if audio_level < 10 and self.sequence % 100 == 0:
-                        print(f"Warning: Very low audio level ({audio_level:.1f}). Check your microphone.")
+                        self.logger.warning(f"🎤 Very low audio level ({audio_level:.1f}). Check your microphone.")
                     
                     # Create audio message
                     message = {
@@ -253,7 +275,7 @@ class SimpleAudioClient:
                     try:
                         await self.websocket.send(json.dumps(message))
                     except websockets.exceptions.ConnectionClosed:
-                        print("Connection closed while sending audio - stopping")
+                        self.logger.info("Connection closed while sending audio - stopping")
                         self.running = False
                         break
                     
@@ -262,14 +284,14 @@ class SimpleAudioClient:
                     await asyncio.sleep(chunk_duration * 0.5)  # Sleep for half the chunk duration
                     
                 except Exception as e:
-                    print(f"Error capturing audio: {e}")
+                    self.logger.error(f"Error capturing audio: {e}")
                     await asyncio.sleep(0.1)
                     
         except websockets.exceptions.ConnectionClosed:
-            print("Connection closed - audio sending stopped")
+            self.logger.debug("Connection closed - audio sending stopped")
             self.running = False
         except Exception as e:
-            print(f"Error in send loop: {e}")
+            self.logger.warning(f"Error in send loop: {e}")
             self.running = False
             
     async def receive_audio_loop(self):
@@ -278,7 +300,7 @@ class SimpleAudioClient:
             while self.running and self.websocket:
                 # Check if the websocket is closed
                 if hasattr(self.websocket, 'closed') and self.websocket.closed:
-                    print("WebSocket connection closed - stopped receiving")
+                    self.logger.debug("WebSocket connection closed - stopped receiving")
                     self.running = False
                     break
                 
@@ -291,7 +313,7 @@ class SimpleAudioClient:
                         break
                     continue
                 except websockets.exceptions.ConnectionClosed:
-                    print("Connection closed while waiting for messages")
+                    self.logger.debug("Connection closed while waiting for messages")
                     self.running = False
                     break
                 
@@ -307,12 +329,12 @@ class SimpleAudioClient:
                         
                         # If this is a hangup message, mark it for proper handling
                         if is_hangup:
-                            print("📞 Received audio with hangup flag")
+                            self.logger.debug("📞 Received audio with hangup flag")
                             self.hanging_up = True
                             
                             # If this is a final empty message with hangup flag, terminate immediately
                             if is_final and "audio" not in msg["payload"]:
-                                print("📞 Received final hangup signal without audio, terminating client...")
+                                self.logger.info("📞 Received final hangup signal without audio, terminating client...")
                                 self.running = False
                                 break
                         
@@ -323,42 +345,42 @@ class SimpleAudioClient:
                             
                             # Play it directly - no queuing
                             if audio_data and len(audio_data) > 0:
-                                print(f"Playing audio: hangup={is_hangup}, final={is_final}, size={len(audio_data)}bytes")
+                                self.logger.debug(f"Playing audio: hangup={is_hangup}, final={is_final}, size={len(audio_data)}bytes")
                                 self.process_and_play_audio(audio_data)
                                 
                                 # Check if this was the final audio chunk in a hangup sequence
                                 if is_hangup and is_final:
-                                    print("📞 Received final hangup audio, client will terminate after playback")
+                                    self.logger.info("📞 Received final hangup audio, client will terminate after playback")
                             else:
-                                print("Received empty audio data")
+                                self.logger.debug("Received empty audio data")
                     
                     # Handle status messages (transcription, state updates)
                     elif msg["type"] == "status":
                         # Check if we're hanging up
                         if msg["payload"].get("state") == "hanging_up":
-                            print("Server is hanging up")
+                            self.logger.info("Server is hanging up")
                             self.hanging_up = True
                             
                         # Handle speech detection
                         if "is_speech" in msg["payload"]:
                             is_speech = msg["payload"]["is_speech"]
                             if is_speech:
-                                print("🎤 Speech detected...")
+                                self.logger.info("🎤 Speech detected...")
                                 
                         # Handle state transitions
                         if "state" in msg["payload"]:
                             state = msg["payload"]["state"]
-                            print(f"🔄 State: {state}")
+                            self.logger.debug(f"🔄 State: {state}")
                             
                         # Handle transcription
                         if "transcription" in msg["payload"]:
                             text = msg["payload"]["transcription"]["text"]
-                            print(f"🔊 You said: \"{text}\"")
+                            self.logger.info(f"🔊 You said: \"{text}\"")
                     
                     # Handle error messages
                     elif msg["type"] == "error":
                         error = msg["payload"].get("error", "Unknown error")
-                        print(f"❌ Error: {error}")
+                        self.logger.error(f"❌ Error: {error}")
                         
                     # Handle tool events
                     elif msg["type"] == "tool_event":
@@ -369,19 +391,19 @@ class SimpleAudioClient:
                         if event_type == "tool_start":
                             self.tool_active = True
                             self.current_tool = tool_name
-                            print(f"🔧 Tool started: {tool_name}")
+                            self.logger.info(f"🔧 Tool started: {tool_name}")
                             # TODO: Start blinking LEDs here
                             
                         elif event_type == "tool_end":
                             if tool_name == self.current_tool:
                                 self.tool_active = False
                                 self.current_tool = None
-                                print(f"✅ Tool completed: {tool_name}")
+                                self.logger.info(f"✅ Tool completed: {tool_name}")
                                 # TODO: Stop blinking LEDs here if no other tools are active
                                 
                         elif event_type == "tool_error":
                             error_msg = details.get("error") if details else "Unknown error"
-                            print(f"❌ Tool error in {tool_name}: {error_msg}")
+                            self.logger.error(f"❌ Tool error in {tool_name}: {error_msg}")
                             if tool_name == self.current_tool:
                                 self.tool_active = False
                                 self.current_tool = None
@@ -394,16 +416,19 @@ class SimpleAudioClient:
                             # TODO: Reset LEDs to idle state
                 
                 except json.JSONDecodeError:
-                    print(f"Invalid JSON message")
+                    self.logger.error(f"Invalid JSON message")
                 except KeyError as e:
-                    print(f"Missing key in message: {e}")
+                    self.logger.error(f"Missing key in message: {e}")
                 except Exception as e:
-                    print(f"Error processing message: {e}")
+                    self.logger.error(f"Error processing message: {e}")
                     import traceback
                     traceback.print_exc()
                 
+        except websockets.exceptions.ConnectionClosed:
+            self.logger.debug("Connection closed - message receiving stopped")
+            self.running = False
         except Exception as e:
-            print(f"Error in receive loop: {e}")
+            self.logger.error(f"Error in receive loop: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -464,19 +489,19 @@ class SimpleAudioClient:
             
             # Play the audio directly
             if self.speaker_stream:
-                print(f"▶️ Playing audio ({len(pcm_data)} bytes)")
+                self.logger.debug(f"▶️ Playing audio ({len(pcm_data)} bytes)")
                 self.speaker_stream.write(pcm_data)
-                print("✅ Audio playback complete")
+                self.logger.debug("✅ Audio playback complete")
                 
                 # If we're hanging up and this was the final audio chunk, terminate the client
                 if self.hanging_up:
-                    print("📞 Final hangup audio played, terminating client...")
+                    self.logger.info("📞 Final hangup audio played, terminating client...")
                     self.running = False
             else:
-                print("Speaker stream unavailable - cannot play audio")
+                self.logger.warning("Speaker stream unavailable - cannot play audio")
             
         except Exception as audio_err:
-            print(f"Error processing audio: {audio_err}")
+            self.logger.error(f"Error processing audio: {audio_err}")
             import traceback
             traceback.print_exc()
 
@@ -493,7 +518,7 @@ async def main():
     try:
         await client.run()
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        client.logger.info("\n🛑 Interrupted by user")
     finally:
         # Make sure we clean up
         if client.websocket:

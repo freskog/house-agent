@@ -16,9 +16,15 @@ from audio.server import (
     TranscriptionResult
 )
 
+# Import our logging infrastructure
+from utils.logging_config import setup_logging
+
+# Set up logger for this module
+logger = setup_logging(__name__)
+
 async def demo_transcription_callback(transcription: TranscriptionResult) -> str:
     """Demo callback for transcriptions that simply echoes what was heard"""
-    print(f"Transcribed: {transcription.text}")
+    logger.info(f"🎤 Transcribed: {transcription.text}")
     
     # In a real application, this would process the text through a proper agent
     # and return a meaningful response
@@ -47,7 +53,7 @@ async def main(args):
     )
     
     # Create server - this will eagerly initialize all components
-    print(f"Starting audio server with {args.model} model on {args.device}...")
+    logger.info(f"🚀 Starting audio server with {args.model} model on {args.device}...")
     server = AudioServer(
         host=args.host,
         port=args.port,
@@ -66,12 +72,12 @@ async def main(args):
     
     # Start server
     await server.start()
-    print(f"Audio server started on ws://{args.host}:{args.port}")
+    logger.info(f"✅ Audio server started on ws://{args.host}:{args.port}")
     if args.save_recordings:
-        print("Audio recording is ENABLED - Transcribed speech will be saved to 'recordings/' directory")
+        logger.info("📁 Audio recording is ENABLED - Transcribed speech will be saved to 'recordings/' directory")
     else:
-        print("Audio recording is disabled - Use --save-recordings flag to enable")
-    print("Press Ctrl+C to stop")
+        logger.info("📁 Audio recording is disabled - Use --save-recordings flag to enable")
+    logger.info("🛑 Press Ctrl+C to stop")
     
     # Keep running until interrupted
     try:
@@ -82,7 +88,7 @@ async def main(args):
         
 async def cleanup(server):
     """Cleanup resources"""
-    print("Shutting down server...")
+    logger.info("🧹 Shutting down server...")
     await server.stop()
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     for task in tasks:
@@ -109,4 +115,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main(args))
     except KeyboardInterrupt:
-        print("Server stopped by user") 
+        logger.info("🛑 Server stopped by user") 

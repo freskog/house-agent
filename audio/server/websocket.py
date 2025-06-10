@@ -23,16 +23,26 @@ from .transcribe import Transcriber, TranscriptionConfig, TranscriptionResult
 from .tts import TTSEngine, TTSConfig
 from langsmith import traceable
 
+# Import logging and metrics infrastructure
+from utils import get_logger
+from utils.metrics import (
+    log_performance, log_transcription_performance, log_tts_performance,
+    start_timer, end_timer, TimerContext, OperationType
+)
+
+# Initialize logging
+logger = get_logger(__name__)
+
 # Create a LangSmith client for additional tracing needs
 # Importing Client for tracing
 try:
     from langsmith import Client
     # Don't initialize at module level - we'll create clients on demand
     has_langsmith = os.environ.get("LANGSMITH_TRACING_V2", "false").lower() == "true"
-    print(f"LangSmith module imported successfully, tracing enabled: {has_langsmith}")
+    logger.debug(f"LangSmith module imported successfully, tracing enabled: {has_langsmith}")
 except ImportError:
     # Fallback if langsmith is not available
-    print("LangSmith not available, tracing disabled")
+    logger.debug("LangSmith not available, tracing disabled")
     has_langsmith = False
 
 def create_langsmith_client():
@@ -51,10 +61,10 @@ def create_langsmith_client():
             
         client = Client()
         has_trace = hasattr(client, 'trace')
-        print(f"LangSmith client created. has_trace={has_trace}, API Key set: {bool(os.environ.get('LANGSMITH_API_KEY'))}, Tracing enabled: {os.environ.get('LANGSMITH_TRACING_V2')}")
+        logger.debug(f"LangSmith client created. has_trace={has_trace}, API Key set: {bool(os.environ.get('LANGSMITH_API_KEY'))}, Tracing enabled: {os.environ.get('LANGSMITH_TRACING_V2')}")
         return client
     except Exception as e:
-        print(f"Error creating LangSmith client: {e}")
+        logger.warning(f"Error creating LangSmith client: {e}")
         return None
 
 # Type for transcription callback
@@ -65,6 +75,7 @@ class AudioProcessingState:
     """Tracks the state of audio processing for a client"""
     
     def __init__(self):
+        self.logger = get_logger(f"{__name__}.AudioProcessingState")
         self.is_speech_active = False
         self.speech_frames: List[bytes] = []
         self.last_speech_time = time.time()  # Initialize with current time to avoid NoneType error
@@ -72,7 +83,7 @@ class AudioProcessingState:
         self.pre_vad_buffer = collections.deque(maxlen=10)  # Increase buffer size to ~0.6 seconds at 16kHz
         # Generate a unique thread ID for this client to use with LangSmith
         self.thread_id = str(uuid.uuid4())
-        print(f"New client state initialized with thread_id: {self.thread_id}")
+        self.logger.debug(f"New client state initialized with thread_id: {self.thread_id}")
         
     def reset(self):
         """Reset the state"""
@@ -93,21 +104,21 @@ class AudioProcessingState:
             self.speech_frames.append(frame)
             self.last_speech_time = time.time()
         else:
-            print("WARNING: Attempted to add empty frame to speech buffer")
+            self.logger.warning("Attempted to add empty frame to speech buffer")
         
     def get_audio_data(self) -> bytes:
         """Get the combined audio data"""
         if not self.speech_frames:
-            print("WARNING: No speech frames to join!")
+            self.logger.warning("No speech frames to join!")
             return b''
             
         # Filter out empty frames
         non_empty_frames = [frame for frame in self.speech_frames if frame and len(frame) > 0]
         if len(non_empty_frames) < len(self.speech_frames):
-            print(f"WARNING: Filtered out {len(self.speech_frames) - len(non_empty_frames)} empty frames")
+            self.logger.warning(f"Filtered out {len(self.speech_frames) - len(non_empty_frames)} empty frames")
             
         if not non_empty_frames:
-            print("ERROR: All frames were empty!")
+            self.logger.error("All frames were empty!")
             return b''
             
         return b''.join(non_empty_frames)
@@ -129,6 +140,7 @@ class AudioServer:
                 tts_config: Optional[TTSConfig] = None,
                 transcription_callback: Optional[TranscriptionCallback] = None,
                 save_recordings: bool = False):
+        self.logger = get_logger(f"{__name__}.AudioServer")
         self.host = host
         self.port = port
         
@@ -159,23 +171,23 @@ class AudioServer:
         
         # All components should already be initialized eagerly at this point,
         # but we'll verify and report their status here
-        print("Checking audio processing components initialization...")
+        self.logger.debug("Checking audio processing components initialization...")
         
         vad_initialized = self.vad_handler.initialized
         transcriber_initialized = self.transcriber.model is not None
         tts_initialized = self.tts_engine.initialized
         
         if not vad_initialized:
-            print("⚠️ WARNING: VAD engine not initialized")
+            self.logger.warning("VAD engine not initialized")
         if not transcriber_initialized:
-            print("⚠️ WARNING: Transcription engine not initialized")
+            self.logger.warning("Transcription engine not initialized")
         if not tts_initialized:
-            print("⚠️ WARNING: TTS engine not initialized")
+            self.logger.warning("TTS engine not initialized")
             
         if vad_initialized and transcriber_initialized and tts_initialized:
-            print("✅ All audio processing components initialized successfully")
+            self.logger.info("✅ All audio processing components initialized successfully")
         else:
-            print("⚠️ Some components failed to initialize, functionality may be limited")
+            self.logger.warning("⚠️ Some components failed to initialize, functionality may be limited")
         
     async def start(self):
         """Start the WebSocket server"""
@@ -188,7 +200,7 @@ class AudioServer:
             ping_timeout=10,     # Wait 10 seconds for a pong response
             close_timeout=5      # Wait 5 seconds for the close handshake
         )
-        print(f"Audio server started on ws://{self.host}:{self.port}")
+        self.logger.info(f"🎙️ Audio server started on ws://{self.host}:{self.port}")
         return self.server
         
     async def stop(self):
@@ -205,7 +217,7 @@ class AudioServer:
             # Create state for this client
             self.client_states[websocket] = AudioProcessingState()
             
-            print(f"New connection from {websocket.remote_address}")
+            self.logger.info(f"🔗 New connection from {websocket.remote_address}")
             
             async for message in websocket:
                 try:
@@ -217,22 +229,22 @@ class AudioServer:
                         await self.handle_audio_stream(websocket, msg)
                     elif msg.type == MessageType.DISCONNECT:
                         # Client is explicitly disconnecting
-                        print(f"Client {websocket.remote_address} sent disconnect message")
+                        self.logger.info(f"📞 Client {websocket.remote_address} sent disconnect message")
                         break
                     else:
-                        print(f"Unhandled message type: {msg.type}")
+                        self.logger.warning(f"Unhandled message type: {msg.type}")
                         
                 except json.JSONDecodeError:
-                    print("Invalid message format")
+                    self.logger.warning("Invalid message format received")
                 except Exception as e:
-                    print(f"Error handling message: {e}")
+                    self.logger.error(f"Error handling message: {e}")
                     await self.send_error(websocket, str(e))
                     
         except websockets.exceptions.ConnectionClosed as e:
-            print(f"Connection closed from {websocket.remote_address}: {e}")
+            self.logger.info(f"📞 Connection closed from {websocket.remote_address}: {e}")
         finally:
             # Cleanup when client disconnects for any reason
-            print(f"Cleaning up resources for {websocket.remote_address}")
+            self.logger.debug(f"Cleaning up resources for {websocket.remote_address}")
             if websocket in self.connections:
                 self.connections.remove(websocket)
             if websocket in self.client_states:
@@ -242,7 +254,7 @@ class AudioServer:
         """Handle incoming audio stream data"""
         # First check if connection is still valid before processing
         if websocket not in self.connections:
-            print("Ignoring audio stream from closed connection")
+            self.logger.debug("Ignoring audio stream from closed connection")
             return
             
         try:
@@ -256,16 +268,16 @@ class AudioServer:
             try:
                 audio_data = base64.b64decode(audio_data_b64)
                 if len(audio_data) == 0:
-                    print("WARNING: Received empty audio data from client!")
+                    self.logger.warning("Received empty audio data from client!")
                     return  # Skip empty frames entirely
             except Exception as e:
-                print(f"ERROR: Failed to decode base64 audio data: {e}")
+                self.logger.error(f"Failed to decode base64 audio data: {e}")
                 await self.send_error(websocket, f"Invalid audio data format: {e}")
                 return
             
             # Check again if connection is still valid after decoding
             if websocket not in self.connections:
-                print("Connection closed during audio processing, skipping further processing")
+                self.logger.debug("Connection closed during audio processing, skipping further processing")
                 return
                 
             # Get client state
@@ -302,7 +314,7 @@ class AudioServer:
                             client_state.speech_frames.append(frame)
                     
                     # Only log a simple message when speech starts
-                    print("Speech detected - recording started")
+                    self.logger.info("🎤 Speech detected - recording started")
                 
                 # Always add the current frame to speech collection
                 if audio_data and len(audio_data) > 0:
@@ -311,7 +323,7 @@ class AudioServer:
                     
                     # Reduce logging frequency even further (only log every 100 frames)
                     if len(client_state.speech_frames) % 100 == 0:
-                        print(f"Recording: {len(client_state.speech_frames)*2/16000:.1f}s")
+                        self.logger.debug(f"Recording: {len(client_state.speech_frames)*2/16000:.1f}s")
                 
                 # If this is a transition from silence to speech, send status
                 if not was_speech_active:
@@ -319,7 +331,7 @@ class AudioServer:
                 
                 # Check if we've exceeded max recording duration
                 if client_state.get_recording_duration() > self.max_recording_duration:
-                    print(f"Max recording duration reached ({self.max_recording_duration}s), processing...")
+                    self.logger.info(f"⏰ Max recording duration reached ({self.max_recording_duration}s), processing...")
                     await self.send_status(websocket, vad_result, state="processing")
                     await self.process_recording(websocket, client_state)
             elif client_state.is_speech_active:
@@ -332,7 +344,7 @@ class AudioServer:
                 
                 # Only log when silence exceeds threshold
                 if silence_duration > self.silence_threshold:
-                    print("Processing recording...")
+                    self.logger.info("🔇 Processing recording...")
                     await self.send_status(websocket, vad_result, state="processing")
                     await self.process_recording(websocket, client_state)
                     if hasattr(client_state, '_silence_logged'):
@@ -341,20 +353,20 @@ class AudioServer:
                 # If this is a transition from speech to silence (after processing),
                 # send a status update
                 if was_speech_active:
-                    print(f"Speech ended")
+                    self.logger.info("🔇 Speech ended")
                     await self.send_status(websocket, vad_result)
                     if hasattr(client_state, '_silence_logged'):
                         delattr(client_state, '_silence_logged')
         
         except websockets.exceptions.ConnectionClosed:
-            print(f"Connection closed during audio processing")
+            self.logger.debug("Connection closed during audio processing")
             # Clean up resources for this connection
             if websocket in self.connections:
                 self.connections.remove(websocket)
             if websocket in self.client_states:
                 del self.client_states[websocket]
         except Exception as e:
-            print(f"Error processing audio stream: {e}")
+            self.logger.error(f"Error processing audio stream: {e}")
             try:
                 if websocket in self.connections:
                     await self.send_error(websocket, str(e))
@@ -365,7 +377,7 @@ class AudioServer:
                 if websocket in self.client_states:
                     del self.client_states[websocket]
             except Exception as nested_error:
-                print(f"Error sending error about audio processing: {nested_error}")
+                self.logger.error(f"Error sending error about audio processing: {nested_error}")
             
     @traceable(run_type="chain", name="Voice_Assistant_Pipeline", skip_if=lambda: not has_langsmith)
     async def process_recording(self, websocket, client_state: AudioProcessingState):
@@ -378,6 +390,11 @@ class AudioServer:
         4. Converts any text response to speech
         5. Sends the response back to the client
         """
+        # Start comprehensive timing for the entire pipeline
+        pipeline_timer = TimerContext(OperationType.VOICE_PROCESSING.value, {
+            "client_thread_id": client_state.thread_id
+        }).start()
+        
         try:
             # Get the combined audio data
             audio_data = client_state.get_audio_data()
@@ -387,15 +404,16 @@ class AudioServer:
             if not audio_data or len(audio_data) < 1000:  # Less than 1KB is probably not speech
                 # Only log for recordings that are not tiny noise blips
                 if len(audio_data) > 500:
-                    print(f"WARNING: Recording too short to process ({len(audio_data)} bytes)")
+                    self.logger.warning(f"Recording too short to process ({len(audio_data)} bytes)")
                 # Reset this recording
                 client_state.reset()
                 # Clear speech indicator
                 await self.send_status(websocket, VADResult(is_speech=False), "idle")
+                pipeline_timer.end()
                 return
                 
             # More concise logging
-            print(f"Processing: {recording_duration:.1f}s")
+            self.logger.info(f"📊 Processing: {recording_duration:.1f}s ({len(audio_data)/1024:.1f}KB)")
             
             # Optional: save recording to disk for debugging
             if self.save_recordings:
@@ -413,9 +431,9 @@ class AudioServer:
                         wf.setframerate(16000)  # 16kHz
                         wf.writeframes(audio_data)
                         
-                    print(f"Saved recording to recordings/recording_{timestamp}.wav")
+                    self.logger.debug(f"Saved recording to recordings/recording_{timestamp}.wav")
                 except Exception as e:
-                    print(f"Error saving recording: {e}")
+                    self.logger.warning(f"Error saving recording: {e}")
             
             # Add trace metadata for LangSmith
             audio_metadata = {
@@ -433,7 +451,7 @@ class AudioServer:
             # Define a trace context
             if langsmith_client and hasattr(langsmith_client, 'trace'):
                 try:
-                    print(f"Creating LangSmith trace with thread_id: {client_state.thread_id}")
+                    self.logger.debug(f"Creating LangSmith trace with thread_id: {client_state.thread_id}")
                     # Pass thread_id to ensure traces from the same client are grouped together
                     trace_context = langsmith_client.trace(
                         "Voice_Processing", 
@@ -441,7 +459,7 @@ class AudioServer:
                         thread_id=client_state.thread_id
                     )
                 except Exception as e:
-                    print(f"Error creating LangSmith trace: {e}")
+                    self.logger.warning(f"Error creating LangSmith trace: {e}")
                     from contextlib import nullcontext
                     trace_context = nullcontext()
             else:
@@ -449,9 +467,9 @@ class AudioServer:
                 from contextlib import nullcontext
                 trace_context = nullcontext()
                 if not langsmith_client:
-                    print("LangSmith client not available")
+                    self.logger.debug("LangSmith client not available")
                 elif not hasattr(langsmith_client, 'trace'):
-                    print("LangSmith client does not have trace method")
+                    self.logger.debug("LangSmith client does not have trace method")
                 
             # Trace this part of the process to LangSmith if available
             with trace_context as parent_run:
@@ -460,7 +478,8 @@ class AudioServer:
                 await self.send_processing_indicator(websocket)
                 
                 # Perform transcription
-                transcription_start_time = time.time()
+                pipeline_timer.checkpoint("audio_prepared")
+                transcription_start_time = start_timer()
                 transcription_result = self.transcriber.transcribe_audio(
                     audio_data, 
                     thread_id=client_state.thread_id
@@ -470,8 +489,16 @@ class AudioServer:
                 if not transcription_result.thread_id:
                     transcription_result.thread_id = client_state.thread_id
                     
-                transcription_time = time.time() - transcription_start_time
-                print(f"Transcribed ({transcription_time:.1f}s): '{transcription_result.text}'")
+                transcription_time = end_timer(transcription_start_time)
+                log_transcription_performance(
+                    audio_duration_ms=recording_duration * 1000,
+                    transcription_duration_ms=transcription_time,
+                    text_length=len(transcription_result.text),
+                    confidence=transcription_result.confidence,
+                    model_type=self.transcriber.config.model_name if self.transcriber.config else "unknown"
+                )
+                self.logger.info(f"🎯 Transcribed ({transcription_time:.2f}ms): '{transcription_result.text[:100]}{'...' if len(transcription_result.text) > 100 else ''}'")
+                pipeline_timer.checkpoint("transcription_complete")
                 
                 # Reset recording state
                 client_state.reset()
@@ -480,7 +507,7 @@ class AudioServer:
                 try:
                     await self.send_transcription(websocket, transcription_result)
                 except Exception as e:
-                    print(f"Error sending transcription: {e}")
+                    self.logger.error(f"Error sending transcription: {e}")
                 
                 # Add trace metadata for transcription results
                 if parent_run and hasattr(parent_run, 'add_metadata'):
@@ -494,11 +521,21 @@ class AudioServer:
                 transcription_result._websocket = websocket
                 
                 # Process transcription with callback
-                processing_start_time = time.time()
+                callback_start_time = start_timer()
                 
                 # Use the configured callback or default
                 callback_result = await self.transcription_callback(transcription_result)
-                processing_time = time.time() - processing_start_time
+                callback_duration = end_timer(callback_start_time)
+                
+                log_performance(
+                    "agent_callback",
+                    callback_duration,
+                    {
+                        "transcription_text": transcription_result.text[:50],
+                        "thread_id": client_state.thread_id
+                    }
+                )
+                pipeline_timer.checkpoint("agent_callback_complete")
                                 
                 # Handle different types of callback results
                 if isinstance(callback_result, str):
@@ -519,80 +556,94 @@ class AudioServer:
                         
                     # Process TTS regardless of tracing availability
                     if is_valid_text:
-                        print(f"DEBUG: Starting TTS for: '{response_text}'")
-                        tts_start_time = time.time()
+                        self.logger.info(f"🔊 Starting TTS for: '{response_text[:50]}{'...' if len(response_text) > 50 else ''}'")
+                        tts_start_time = start_timer()
                         
                         # Use streaming TTS to send audio as soon as each sentence is ready
                         streaming_success = await self.text_to_speech_streaming(response_text, websocket)
-                        tts_time = time.time() - tts_start_time
+                        tts_duration = end_timer(tts_start_time)
                         
                         if streaming_success:
-                            print(f"DEBUG: TTS streaming success in {tts_time:.1f}s")
+                            log_tts_performance(
+                                text_length=len(response_text),
+                                generation_duration_ms=tts_duration,
+                                streaming=True
+                            )
+                            self.logger.info(f"⚡ TTS streaming success in {tts_duration:.2f}ms")
+                            pipeline_timer.checkpoint("tts_streaming_complete")
                             
                             # Add trace metadata for TTS results if available
                             if parent_run and hasattr(parent_run, 'add_metadata'):
                                 parent_run.add_metadata({
-                                    "tts_duration_sec": tts_time,
+                                    "tts_duration_sec": tts_duration / 1000,
                                     "tts_streaming": True
                                 })
                             
                             # If the response is not a question, hang up the call
                             if not is_question:
-                                print(f"DEBUG: Response is not a question. Hanging up automatically...")
+                                self.logger.info("🔚 Response is not a question. Hanging up automatically...")
                                 # Small delay to ensure audio is played before hanging up
                                 await asyncio.sleep(0.5)
                                 await self.hang_up(websocket, "")  # Empty message to avoid saying "Call ended" after response
                         else:
-                            print(f"DEBUG: TTS streaming failed - falling back to non-streaming TTS")
+                            self.logger.warning("TTS streaming failed - falling back to non-streaming TTS")
                             # Fallback to non-streaming TTS
                             audio_response = await self.text_to_speech(response_text)
                             
                             if audio_response:
-                                print(f"DEBUG: Fallback TTS success - audio size: {len(audio_response)/1024:.1f}KB")
+                                log_tts_performance(
+                                    text_length=len(response_text),
+                                    generation_duration_ms=tts_duration,
+                                    audio_size_bytes=len(audio_response),
+                                    streaming=False
+                                )
+                                self.logger.info(f"⚡ Fallback TTS success - audio size: {len(audio_response)/1024:.1f}KB")
+                                pipeline_timer.checkpoint("tts_fallback_complete")
                                 
                                 # Add trace metadata for TTS results if available
                                 if parent_run and hasattr(parent_run, 'add_metadata'):
                                     parent_run.add_metadata({
-                                        "tts_duration_sec": tts_time,
+                                        "tts_duration_sec": tts_duration / 1000,
                                         "tts_audio_size_kb": len(audio_response) / 1024,
                                         "tts_streaming": False,
                                         "tts_fallback": True
                                     })
                                 
                                 # Send audio back to client
-                                print(f"DEBUG: Sending fallback audio to client")
+                                self.logger.debug("Sending fallback audio to client")
                                 await self.send_audio_playback(websocket, audio_response)
-                                print(f"DEBUG: Fallback audio sent successfully")
+                                self.logger.debug("Fallback audio sent successfully")
                                 
                                 # If the response is not a question, hang up the call
                                 if not is_question:
-                                    print(f"DEBUG: Response is not a question. Hanging up automatically...")
+                                    self.logger.info("🔚 Response is not a question. Hanging up automatically...")
                                     # Small delay to ensure audio is played before hanging up
                                     await asyncio.sleep(0.5)
                                     await self.hang_up(websocket, "")  # Empty message to avoid saying "Call ended" after response
                             else:
-                                print(f"DEBUG: Fallback TTS also failed - returned empty audio for: '{response_text}'")
+                                self.logger.error(f"Fallback TTS also failed - returned empty audio for: '{response_text[:50]}{'...' if len(response_text) > 50 else ''}'")
                                 await self.send_error(websocket, "Failed to generate speech")
                     else:
-                        print(f"DEBUG: Empty or invalid response text: '{response_text}', not generating TTS")
+                        self.logger.warning(f"Empty or invalid response text: '{response_text[:50] if response_text else 'None'}', not generating TTS")
                         
                 elif isinstance(callback_result, bytes):
                     # Direct audio response - log minimally
-                    print("Got direct audio response")
+                    self.logger.debug("Got direct audio response")
                     await self.send_audio_playback(websocket, callback_result)
+                    pipeline_timer.checkpoint("audio_response_sent")
                     
                 elif isinstance(callback_result, dict):
                     # Structured response - log minimally
-                    print("Got structured response")
+                    self.logger.debug("Got structured response")
                     
                     # Handle text for TTS
                     if "text" in callback_result and callback_result["text"]:
                         text_response = callback_result["text"]
-                        print(f"DEBUG: Got structured response text: '{text_response}'")
+                        self.logger.debug(f"Got structured response text: '{text_response[:50]}{'...' if len(text_response) > 50 else ''}'")
                         
                         # Check if the response is a question
                         is_question = self._is_question(text_response)
-                        print(f"DEBUG: Is structured response a question? {is_question}")
+                        self.logger.debug(f"Is structured response a question? {is_question}")
                         
                         # Add trace metadata for the response if available
                         if parent_run and hasattr(parent_run, 'add_metadata'):
@@ -601,40 +652,53 @@ class AudioServer:
                             })
                         
                         # Convert to speech (regardless of tracing)
-                        tts_start_time = time.time()
+                        struct_tts_start = start_timer()
                         
                         # Use streaming TTS for structured responses too
                         streaming_success = await self.text_to_speech_streaming(text_response, websocket)
-                        tts_time = time.time() - tts_start_time
+                        struct_tts_duration = end_timer(struct_tts_start)
                         
                         if streaming_success:
-                            print(f"DEBUG: TTS streaming success for structured response in {tts_time:.1f}s")
+                            log_tts_performance(
+                                text_length=len(text_response),
+                                generation_duration_ms=struct_tts_duration,
+                                streaming=True
+                            )
+                            self.logger.info(f"⚡ TTS streaming success for structured response in {struct_tts_duration:.2f}ms")
+                            pipeline_timer.checkpoint("structured_tts_streaming_complete")
                             
                             # Add trace metadata for TTS results if available
                             if parent_run and hasattr(parent_run, 'add_metadata'):
                                 parent_run.add_metadata({
-                                    "tts_duration_sec": tts_time,
+                                    "tts_duration_sec": struct_tts_duration / 1000,
                                     "tts_streaming": True
                                 })
                             
                             # If the response is not a question, hang up the call
                             if not is_question:
-                                print(f"DEBUG: Structured response is not a question. Hanging up automatically...")
+                                self.logger.info("🔚 Structured response is not a question. Hanging up automatically...")
                                 # Small delay to ensure audio is played before hanging up
                                 await asyncio.sleep(0.5)
                                 await self.hang_up(websocket, "")  # Empty message to avoid saying "Call ended" after response
                         else:
-                            print(f"DEBUG: TTS streaming failed for structured response - falling back to non-streaming TTS")
+                            self.logger.warning("TTS streaming failed for structured response - falling back to non-streaming TTS")
                             # Fallback to non-streaming TTS
                             audio_response = await self.text_to_speech(text_response)
                             
                             if audio_response:
-                                print(f"DEBUG: Fallback TTS success - structured response audio size: {len(audio_response)/1024:.1f}KB")
+                                log_tts_performance(
+                                    text_length=len(text_response),
+                                    generation_duration_ms=struct_tts_duration,
+                                    audio_size_bytes=len(audio_response),
+                                    streaming=False
+                                )
+                                self.logger.info(f"⚡ Fallback TTS success - structured response audio size: {len(audio_response)/1024:.1f}KB")
+                                pipeline_timer.checkpoint("structured_tts_fallback_complete")
                                 
                                 # Add trace metadata for TTS results if available
                                 if parent_run and hasattr(parent_run, 'add_metadata'):
                                     parent_run.add_metadata({
-                                        "tts_duration_sec": tts_time,
+                                        "tts_duration_sec": struct_tts_duration / 1000,
                                         "tts_audio_size_kb": len(audio_response) / 1024,
                                         "tts_streaming": False,
                                         "tts_fallback": True
@@ -645,12 +709,12 @@ class AudioServer:
                                 
                                 # If the response is not a question, hang up the call
                                 if not is_question:
-                                    print(f"DEBUG: Structured response is not a question. Hanging up automatically...")
+                                    self.logger.info("🔚 Structured response is not a question. Hanging up automatically...")
                                     # Small delay to ensure audio is played before hanging up
                                     await asyncio.sleep(0.5)
                                     await self.hang_up(websocket, "")  # Empty message to avoid saying "Call ended" after response
                             else:
-                                print(f"DEBUG: TTS failed for structured response text: '{text_response}'")
+                                self.logger.error(f"TTS failed for structured response text: '{text_response[:50]}{'...' if len(text_response) > 50 else ''}'")
                                 await self.send_error(websocket, "Failed to generate speech")
 
                     # Handle direct audio if provided
@@ -662,20 +726,23 @@ class AudioServer:
                         await self.send_status(websocket, VADResult(), callback_result["status"])
                         
                 else:
-                    print(f"Unknown callback result type: {type(callback_result)}")
+                    self.logger.warning(f"Unknown callback result type: {type(callback_result)}")
                 
                 # Finally, send status back to idle when done processing
                 await self.send_status(websocket, VADResult(is_speech=False), "idle")
                 
-                # Record total processing duration
-                total_duration = time.time() - transcription_start_time
+                # Record total processing duration and end timing
+                total_duration = pipeline_timer.end()
+                self.logger.info(f"✅ Voice processing pipeline completed in {total_duration:.2f}ms")
+                
                 if parent_run and hasattr(parent_run, 'add_metadata'):
                     parent_run.add_metadata({
-                        "total_processing_duration_sec": total_duration
+                        "total_processing_duration_sec": total_duration / 1000
                     })
                 
         except Exception as e:
-            print(f"Error processing recording: {e}")
+            self.logger.error(f"Error processing recording: {e}")
+            pipeline_timer.end()  # End timing on error
             import traceback
             traceback.print_exc()
             
@@ -693,30 +760,39 @@ class AudioServer:
         """Convert text to speech using TTS engine"""
         try:
             if not text or text.strip() == "":
-                print("Warning: Empty text provided to TTS, skipping synthesis")
+                self.logger.warning("Empty text provided to TTS, skipping synthesis")
                 return b''
                 
-            print(f"TTS request: '{text}'")
+            self.logger.debug(f"TTS request: '{text[:100]}{'...' if len(text) > 100 else ''}'")
             
             # Check if TTS engine is initialized
             if not self.tts_engine or not self.tts_engine.is_initialized():
-                print("ERROR: TTS engine is not initialized!")
+                self.logger.error("TTS engine is not initialized!")
                 return b''
                 
             # Use the TTS engine to synthesize speech
+            tts_start = start_timer()
             audio_data = await self.tts_engine.synthesize(text)
+            tts_duration = end_timer(tts_start)
             
             if audio_data is None:
-                print("ERROR: TTS returned None!")
+                self.logger.error("TTS returned None!")
                 return b''
                 
-            print(f"TTS response size: {len(audio_data)} bytes")
+            log_tts_performance(
+                text_length=len(text),
+                generation_duration_ms=tts_duration,
+                audio_size_bytes=len(audio_data),
+                streaming=False
+            )
+            
+            self.logger.debug(f"TTS response size: {len(audio_data)} bytes in {tts_duration:.2f}ms")
             if len(audio_data) < 100:
-                print("Warning: TTS produced very small or empty audio data")
+                self.logger.warning("TTS produced very small or empty audio data")
             
             return audio_data
         except Exception as e:
-            print(f"Error in TTS processing: {e}")
+            self.logger.error(f"Error in TTS processing: {e}")
             import traceback
             traceback.print_exc()
             # Return empty audio as fallback
@@ -731,7 +807,7 @@ class AudioServer:
         try:
             # Check if connection is still open
             if websocket not in self.connections:
-                print(f"Not sending status update to closed connection")
+                self.logger.debug("Not sending status update to closed connection")
                 return
                 
             # Prepare payload
@@ -762,20 +838,20 @@ class AudioServer:
             
             # Check again if connection is still open
             if websocket not in self.connections:
-                print(f"Connection closed before sending status")
+                self.logger.debug("Connection closed before sending status")
                 return
                 
             # Send message
             await websocket.send(message.to_json())
         except websockets.exceptions.ConnectionClosed:
-            print(f"Connection closed while sending status update")
+            self.logger.debug("Connection closed while sending status update")
             # Clean up this connection
             if websocket in self.connections:
                 self.connections.remove(websocket)
             if websocket in self.client_states:
                 del self.client_states[websocket]
         except Exception as e:
-            print(f"Error sending status: {e}")
+            self.logger.error(f"Error sending status: {e}")
             # Don't try to send an error about failing to send status - would be circular
             
     async def send_transcription(self, websocket, result: TranscriptionResult):
@@ -783,7 +859,7 @@ class AudioServer:
         try:
             # Check if connection is still open
             if websocket not in self.connections:
-                print(f"Not sending transcription to closed connection")
+                self.logger.debug("Not sending transcription to closed connection")
                 return
                 
             # Prepare payload
@@ -816,20 +892,20 @@ class AudioServer:
             
             # Double-check connection is still open
             if websocket not in self.connections:
-                print(f"Connection closed before sending transcription")
+                self.logger.debug("Connection closed before sending transcription")
                 return
                 
             # Send message
             await websocket.send(message.to_json())
         except websockets.exceptions.ConnectionClosed:
-            print(f"Connection closed while sending transcription")
+            self.logger.debug("Connection closed while sending transcription")
             # Clean up this connection
             if websocket in self.connections:
                 self.connections.remove(websocket)
             if websocket in self.client_states:
                 del self.client_states[websocket]
         except Exception as e:
-            print(f"Error sending transcription: {e}")
+            self.logger.error(f"Error sending transcription: {e}")
             # Don't try to send an error about sending a transcription
             
     async def send_error(self, websocket, error: str, code: Optional[int] = None):
@@ -837,7 +913,7 @@ class AudioServer:
         try:
             # Check if the websocket is still valid and in our connections set
             if websocket not in self.connections:
-                print(f"Not sending error to closed connection: {error}")
+                self.logger.debug(f"Not sending error to closed connection: {error}")
                 return
                 
             # Prepare payload
@@ -867,7 +943,7 @@ class AudioServer:
             
             # Check connection state again before sending
             if websocket not in self.connections:
-                print(f"Connection closed before sending error message")
+                self.logger.debug("Connection closed before sending error message")
                 return
                 
             # Send message
@@ -879,7 +955,7 @@ class AudioServer:
             if websocket in self.client_states:
                 del self.client_states[websocket]
         except Exception as e:
-            print(f"Error sending error message: {e}")
+            self.logger.error(f"Error sending error message: {e}")
             # Don't try to send an error about sending an error - would cause a loop
             
     @traceable(run_type="chain", name="Audio_Chunk_Send")
@@ -895,7 +971,7 @@ class AudioServer:
         try:
             # Check if this is a valid connection
             if websocket not in self.connections:
-                print(f"Warning: Attempted to send audio to closed connection")
+                self.logger.debug("Warning: Attempted to send audio to closed connection")
                 return False
             
             # Encode audio data to base64
@@ -935,13 +1011,13 @@ class AudioServer:
             
             # Log only for empty final chunks
             if is_final and not audio_data:
-                print(f"Sent final stream marker (empty chunk)")
+                self.logger.debug("Sent final stream marker (empty chunk)")
             else:
-                print(f"Sent audio chunk: {audio_size_bytes/1024:.2f}KB, seq={sequence}, final={is_final}, hangup={is_hangup_message}")
+                self.logger.debug(f"🔊 Sent audio chunk: {audio_size_bytes/1024:.2f}KB, seq={sequence}, final={is_final}, hangup={is_hangup_message}")
                 
             return True
         except Exception as e:
-            print(f"Error sending audio playback: {e}")
+            self.logger.error(f"Error sending audio playback: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -955,7 +1031,7 @@ class AudioServer:
         try:
             # Check if this is a valid connection
             if websocket not in self.connections:
-                print(f"Warning: Attempted to send indicator to closed connection")
+                self.logger.debug("Warning: Attempted to send indicator to closed connection")
                 return False
                 
             # Generate a very short tone or click sound (100ms)
@@ -981,7 +1057,7 @@ class AudioServer:
             # Send the tone as audio playback
             return await self.send_audio_playback(websocket, audio_data)
         except Exception as e:
-            print(f"Error sending processing indicator: {e}")
+            self.logger.error(f"Error sending processing indicator: {e}")
             return False
             
     async def hang_up(self, websocket=None, message: str = "Call ended. Goodbye!"):
@@ -995,21 +1071,21 @@ class AudioServer:
             bool: True if successful, False otherwise
         """
         try:
-            print(f"Hang up requested for client: {websocket.remote_address if websocket else 'None'}")
-            print(f"With message: '{message}'")
+            self.logger.info(f"📞 Hang up requested for client: {websocket.remote_address if websocket else 'None'}")
+            self.logger.debug(f"With message: '{message[:50]}{'...' if len(message) > 50 else ''}'")
             
             if websocket is None:
                 if not self.connections:
-                    print("No active connections to hang up")
+                    self.logger.warning("No active connections to hang up")
                     return False
                 # Take the most recent client if none specified
                 websocket = next(iter(self.connections))
-                print(f"Selected client: {websocket.remote_address}")
+                self.logger.debug(f"Selected client: {websocket.remote_address}")
                 
             # Check if this is a valid connection
             if websocket not in self.connections:
-                print(f"Cannot hang up: Connection not found in active connections")
-                print(f"Available connections: {len(self.connections)}")
+                self.logger.warning(f"Cannot hang up: Connection not found in active connections")
+                self.logger.debug(f"Available connections: {len(self.connections)}")
                 
                 # Try to find by ID/remote_address as a fallback
                 if hasattr(websocket, 'remote_address') and websocket.remote_address:
@@ -1017,26 +1093,26 @@ class AudioServer:
                     # Try to find a matching connection
                     for conn in self.connections:
                         if hasattr(conn, 'remote_address') and conn.remote_address == addr:
-                            print(f"Found matching connection by address: {addr}")
+                            self.logger.debug(f"Found matching connection by address: {addr}")
                             websocket = conn
                             break
                     
                 # If still not found after the fallback attempt
                 if websocket not in self.connections:
-                    print(f"Cannot hang up: Connection not found even after fallback checks")
+                    self.logger.error(f"Cannot hang up: Connection not found even after fallback checks")
                     return False
             
             # First, send hanging_up status to prepare client
             try:
-                print("Step 1: Sending hanging_up status")
+                self.logger.debug("📞 Step 1: Sending hanging_up status")
                 await self.send_status(
                     websocket, 
                     VADResult(is_speech=False, confidence=0.0), 
                     state="hanging_up"
                 )
-                print("Hanging_up status sent")
+                self.logger.debug("Hanging_up status sent")
             except websockets.exceptions.ConnectionClosed:
-                print("Connection already closed, skipping hanging_up status")
+                self.logger.debug("Connection already closed, skipping hanging_up status")
                 # If connection is already closed, skip to removal
                 if websocket in self.connections:
                     self.connections.remove(websocket)
@@ -1044,14 +1120,14 @@ class AudioServer:
                     del self.client_states[websocket]
                 return True  # Already closed, so consider it a success
             except Exception as e:
-                print(f"Error sending hanging_up status: {e}")
+                self.logger.error(f"Error sending hanging_up status: {e}")
                 import traceback
                 traceback.print_exc()
                 
             # Send a goodbye message only if not empty and connection is still open
             if message and message.strip() and websocket in self.connections:
                 try:
-                    print(f"Step 2: Synthesizing goodbye message: '{message}'")
+                    self.logger.debug(f"📞 Step 2: Synthesizing goodbye message: '{message[:30]}{'...' if len(message) > 30 else ''}'")
                     
                     # Use streaming TTS for the goodbye message for better responsiveness
                     streaming_success = await self.text_to_speech_streaming(
@@ -1061,26 +1137,26 @@ class AudioServer:
                     )
                     
                     if streaming_success:
-                        print("Goodbye message streamed successfully")
+                        self.logger.debug("Goodbye message streamed successfully")
                     else:
                         # Check if connection is still open before fallback
                         if websocket in self.connections:
                             # Fallback to non-streaming TTS if streaming fails
-                            print("Streaming TTS failed for goodbye message, falling back to regular TTS")
+                            self.logger.debug("Streaming TTS failed for goodbye message, falling back to regular TTS")
                             audio_data = await self.tts_engine.synthesize(message)
                             
                             # Check audio was generated
                             if not audio_data or len(audio_data) == 0:
-                                print("Warning: Failed to generate audio for goodbye message")
+                                self.logger.debug("Warning: Failed to generate audio for goodbye message")
                             else:
-                                print(f"Step 3: Sending {len(audio_data)} bytes of goodbye audio")
+                                self.logger.debug(f"Step 3: Sending {len(audio_data)} bytes of goodbye audio")
                                 # Send the audio with hangup flag for optimized delivery
                                 await self.send_audio_playback(websocket, audio_data, is_hangup_message=True, is_final=True)
-                                print("Goodbye audio sent successfully")
+                                self.logger.debug("Goodbye audio sent successfully")
                 except websockets.exceptions.ConnectionClosed:
-                    print("Connection closed during goodbye message, continuing with cleanup")
+                    self.logger.debug("Connection closed during goodbye message, continuing with cleanup")
                 except Exception as e:
-                    print(f"Error sending goodbye message: {e}")
+                    self.logger.warning(f"Error sending goodbye message: {e}")
                     import traceback
                     traceback.print_exc()
             else:
@@ -1088,31 +1164,31 @@ class AudioServer:
                 # This tells the client to disconnect without playing any audio
                 if websocket in self.connections:
                     try:
-                        print("Step 2: Sending empty hangup signal to client")
+                        self.logger.debug("Step 2: Sending empty hangup signal to client")
                         await self.send_audio_playback(websocket, b'', is_hangup_message=True, is_final=True)
-                        print("Empty hangup signal sent successfully")
+                        self.logger.debug("Empty hangup signal sent successfully")
                     except websockets.exceptions.ConnectionClosed:
-                        print("Connection closed while sending hangup signal")
+                        self.logger.debug("Connection closed while sending hangup signal")
                     except Exception as e:
-                        print(f"Error sending hangup signal: {e}")
+                        self.logger.warning(f"Error sending hangup signal: {e}")
                         import traceback
                         traceback.print_exc()
             
             # Remove the connection from server-side tracking ONLY
             # But do NOT close the connection - let the client decide when to disconnect
             # after it has received and played all audio
-            print(f"Step 4: Removing client from server tracking collections")
+            self.logger.debug(f"Step 4: Removing client from server tracking collections")
             if websocket in self.client_states:
                 del self.client_states[websocket]
-                print("Client state removed from tracking")
+                self.logger.debug("Client state removed from tracking")
             
             # Important: We keep the connection in self.connections until the client
             # explicitly disconnects, so we can still send messages if needed
-            print(f"Step 5: Hangup process complete. Client will disconnect when ready.")
+            self.logger.debug(f"Step 5: Hangup process complete. Client will disconnect when ready.")
             return True
             
         except Exception as e:
-            print(f"Error hanging up call: {e}")
+            self.logger.warning(f"Error hanging up call: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1130,10 +1206,10 @@ class AudioServer:
                 try:
                     await websocket.send(msg_json)
                 except Exception as e:
-                    print(f"Error sending broadcast to client: {e}")
+                    self.logger.warning(f"Error sending broadcast to client: {e}")
                     continue
         except Exception as e:
-            print(f"Error preparing broadcast message: {e}") 
+            self.logger.warning(f"Error preparing broadcast message: {e}") 
 
     def _is_question(self, text: str) -> bool:
         """
@@ -1177,21 +1253,21 @@ class AudioServer:
             bool: True if successful, False otherwise
         """
         try:
-            print(f"Streaming TTS for text: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+            self.logger.info(f"Streaming TTS for text: '{text[:100]}{'...' if len(text) > 50 else ''}'")
             
             # Check TTS engine
             if not self.tts_engine or not self.tts_engine.is_initialized():
-                print("TTS engine not available or not initialized")
+                self.logger.error("TTS engine not available or not initialized")
                 return False
                 
             # Process sentences/segments into audio chunks
             sentences = self.tts_engine._preprocess_text(text)
             
             if not sentences:
-                print("WARNING: No sentences to process")
+                self.logger.debug("WARNING: No sentences to process")
                 return False
                 
-            print(f"Processing {len(sentences)} text segments for streaming TTS")
+            self.logger.debug(f"Processing {len(sentences)} text segments for streaming TTS")
             
             # Initialize tracking
             chunk_count = 0
@@ -1202,18 +1278,18 @@ class AudioServer:
             # Process each sentence and convert to audio
             for i, sentence in enumerate(sentences):
                 if not sentence.strip():
-                    print(f"Skipping empty sentence {i+1}/{len(sentences)}")
+                    self.logger.debug(f"Skipping empty sentence {i+1}/{len(sentences)}")
                     continue
                     
                 # Track if this is the last sentence (for hangup handling)
                 is_last_sentence = (i == len(sentences) - 1)
-                print(f"Processing sentence {i+1}/{len(sentences)}: '{sentence[:30]}{'...' if len(sentence) > 30 else ''}'")
+                self.logger.debug(f"Processing sentence {i+1}/{len(sentences)}: '{sentence[:30]}{'...' if len(sentence) > 30 else ''}'")
                 
                 # Generate audio for this sentence
                 audio_data = await self.tts_engine._generate_audio(sentence)
                 
                 if not audio_data:
-                    print(f"WARNING: No audio generated for sentence {i+1}")
+                    self.logger.debug(f"WARNING: No audio generated for sentence {i+1}")
                     continue
                     
                 chunk_count += 1
@@ -1226,7 +1302,7 @@ class AudioServer:
                 # Record timing for first chunk
                 if is_first_chunk:
                     first_chunk_time = time.time()
-                    print(f"First audio chunk ({audio_size} bytes) generated in {first_chunk_time - start_time:.2f}s")
+                    self.logger.info(f"First audio chunk ({audio_size} bytes) generated in {first_chunk_time - start_time:.2f}s")
                 
                 # Send this chunk to the client
                 success = await self.send_audio_playback(
@@ -1237,7 +1313,7 @@ class AudioServer:
                 )
                 
                 if not success:
-                    print(f"ERROR: Failed to send audio for sentence {i+1}, aborting stream")
+                    self.logger.debug(f"ERROR: Failed to send audio for sentence {i+1}, aborting stream")
                     return False
                 
                 total_bytes += audio_size
@@ -1246,16 +1322,16 @@ class AudioServer:
             total_time = time.time() - start_time
             ttft = first_chunk_time - start_time if first_chunk_time else None  # Time To First Token equivalent
             
-            print(f"TTS streaming complete: {chunk_count} chunks, {total_bytes/1024:.1f}KB in {total_time:.2f}s")
+            self.logger.info(f"TTS streaming complete: {chunk_count} chunks, {total_bytes/1024:.1f}KB in {total_time:.2f}s")
             if ttft:
-                print(f"Time to first chunk: {ttft:.2f}s")
+                self.logger.info(f"Time to first chunk: {ttft:.2f}s")
                 if chunk_count > 0:
-                    print(f"Average chunk size: {total_bytes/chunk_count:.1f} bytes")
+                    self.logger.info(f"Average chunk size: {total_bytes/chunk_count:.1f} bytes")
                     
             return True
             
         except Exception as e:
-            print(f"Error in streaming TTS: {e}")
+            self.logger.warning(f"Error in streaming TTS: {e}")
             import traceback
             traceback.print_exc()
             return False 

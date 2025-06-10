@@ -13,6 +13,12 @@ import re
 import torch
 from langsmith import traceable
 
+# Import our logging infrastructure
+from utils.logging_config import setup_logging
+
+# Set up logger for this module
+logger = setup_logging(__name__)
+
 # Import Kokoro TTS
 from kokoro import KPipeline
 
@@ -61,15 +67,15 @@ class TTSEngine:
         
     def _setup_tts(self):
         """Set up the Kokoro TTS pipeline"""
-        print(f"Initializing Kokoro TTS engine with voice {self.voice} and language {self.lang_code}")
+        logger.info(f"🔊 Initializing Kokoro TTS engine with voice {self.voice} and language {self.lang_code}")
         try:
             # Create the Kokoro pipeline
             self.pipeline = KPipeline(lang_code=self.lang_code)
-            print("Kokoro pipeline created successfully")
+            logger.info("✅ Kokoro pipeline created successfully")
             self.initialized = True
             
         except Exception as e:
-            print(f"Error initializing Kokoro TTS: {e}")
+            logger.error(f"❌ Error initializing Kokoro TTS: {e}")
             self.pipeline = None
             self.initialized = False
             
@@ -117,11 +123,11 @@ class TTSEngine:
                 prioritized_segments.extend(final_segments[4::2])  # The remaining segments
                 final_segments = prioritized_segments
             
-            print(f"Split text into {len(final_segments)} segments for natural speech flow")
+            logger.debug(f"📝 Split text into {len(final_segments)} segments for natural speech flow")
             return final_segments if final_segments else [text]
         
         except Exception as e:
-            print(f"Error during text preprocessing: {e}")
+            logger.error(f"❌ Error during text preprocessing: {e}")
             import traceback
             traceback.print_exc()
             # Safest fallback is to return the whole text as one chunk
@@ -136,7 +142,7 @@ class TTSEngine:
         """
         try:
             if not self.pipeline:
-                print("Kokoro pipeline not initialized")
+                logger.error("❌ Kokoro pipeline not initialized")
                 return None
                 
             # Use event loop to run CPU-bound TTS in a thread pool
@@ -163,7 +169,7 @@ class TTSEngine:
                     else:
                         return None
                 except Exception as e:
-                    print(f"Error in TTS pipeline: {e}")
+                    logger.error(f"❌ Error in TTS pipeline: {e}")
                     return None
             
             # Run in thread pool with a timeout to prevent hanging
@@ -173,18 +179,18 @@ class TTSEngine:
                     timeout=10.0  # 10 second timeout per sentence
                 )
             except asyncio.TimeoutError:
-                print(f"Timeout generating audio for: '{text[:30]}...'")
+                logger.warning(f"⏰ Timeout generating audio for: '{text[:30]}...'")
                 return None
             
             if audio_data is None:
-                print("No audio generated")
+                logger.warning("⚠️ No audio generated")
                 return None
                 
             # Return raw numpy array - no WAV conversion here!
             return audio_data
             
         except Exception as e:
-            print(f"Kokoro TTS error: {e}")
+            logger.error(f"❌ Kokoro TTS error: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -212,7 +218,7 @@ class TTSEngine:
             numpy.ndarray: Combined audio array
         """
         if not audio_arrays:
-            print("No audio arrays to combine")
+            logger.error("No audio arrays to combine")
             return None
             
         # If only one array, return it directly
@@ -221,13 +227,13 @@ class TTSEngine:
             
         try:
             # Simple numpy concatenation - much more efficient than WAV parsing
-            print(f"Concatenating {len(audio_arrays)} audio arrays...")
+            logger.debug(f"Concatenating {len(audio_arrays)} audio arrays...")
             combined = np.concatenate(audio_arrays)
-            print(f"Combined audio: {len(combined)} samples")
+            logger.debug(f"Combined audio: {len(combined)} samples")
             return combined
             
         except Exception as e:
-            print(f"Error combining audio arrays: {e}")
+            logger.error(f"Error combining audio arrays: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -242,45 +248,45 @@ class TTSEngine:
         Returns:
             bytes: Audio data (WAV format), or None if text is empty/whitespace-only
         """
-        print(f"TTS synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
+        logger.info(f"TTS synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
         
         # Handle empty or whitespace-only text as "don't say anything"
         if not text or not str(text).strip():
-            print("Empty or whitespace-only text provided - returning None (silent)")
+            logger.info("Empty or whitespace-only text provided - returning None (silent)")
             return None
             
         if not self.is_initialized():
-            print("ERROR: TTS engine not initialized in synthesize method!")
-            print(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
+            logger.error("ERROR: TTS engine not initialized in synthesize method!")
+            logger.error(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
             return None
             
-        print(f"TTS engine initialized, proceeding with synthesis")
+        logger.info(f"TTS engine initialized, proceeding with synthesis")
 
         # Split text into chunks if needed
         chunks = self._preprocess_text(str(text).strip())
         
         if not chunks:
-            print("Text preprocessing returned no chunks")
+            logger.info("Text preprocessing returned no chunks")
             return None
             
-        print(f"Processing {len(chunks)} text chunks for TTS")
+        logger.info(f"Processing {len(chunks)} text chunks for TTS")
         
         # If only one chunk, optimize for single chunk case
         if len(chunks) == 1:
             chunk = chunks[0].strip()
             if not chunk:
-                print("Single chunk is empty")
+                logger.info("Single chunk is empty")
                 return None
                 
-            print(f"Generating audio for single chunk: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
+            logger.info(f"Generating audio for single chunk: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
             # Generate directly as WAV for single chunk
             audio_data = await self._generate_audio(chunk)
             
             if audio_data:
-                print(f"Generated {len(audio_data)} bytes of audio for single chunk")
+                logger.info(f"Generated {len(audio_data)} bytes of audio for single chunk")
                 return audio_data
             else:
-                print("Failed to generate audio for single chunk")
+                logger.info("Failed to generate audio for single chunk")
                 return None
         
         # Multiple chunks - use optimized numpy array processing
@@ -290,27 +296,27 @@ class TTSEngine:
         for i, chunk in enumerate(chunks):
             chunk = chunk.strip()
             if not chunk:
-                print(f"Skipping empty chunk {i+1}/{len(chunks)}")
+                logger.info(f"Skipping empty chunk {i+1}/{len(chunks)}")
                 continue
                 
-            print(f"Generating audio for chunk {i+1}/{len(chunks)}: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
+            logger.info(f"Generating audio for chunk {i+1}/{len(chunks)}: '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'")
             audio_np = await self._generate_audio_numpy(chunk)
             
             if audio_np is not None:
                 audio_arrays.append(audio_np)
-                print(f"Generated {len(audio_np)} samples for chunk {i+1}")
+                logger.info(f"Generated {len(audio_np)} samples for chunk {i+1}")
             else:
-                print(f"Failed to generate audio for chunk {i+1}")
+                logger.info(f"Failed to generate audio for chunk {i+1}")
         
         if not audio_arrays:
-            print("No audio arrays were generated")
+            logger.info("No audio arrays were generated")
             return None
         
         # Combine all numpy arrays efficiently
         combined_audio = self._combine_audio_numpy(audio_arrays)
         
         if combined_audio is None:
-            print("Failed to combine audio arrays")
+            logger.error("Failed to combine audio arrays")
             return None
         
         # Convert final combined array to WAV only once
@@ -320,11 +326,11 @@ class TTSEngine:
             buffer.seek(0)
             final_audio = buffer.read()
             
-            print(f"Final combined audio size: {len(final_audio)} bytes")
+            logger.info(f"Final combined audio size: {len(final_audio)} bytes")
             return final_audio
             
         except Exception as e:
-            print(f"Error converting final audio to WAV: {e}")
+            logger.error(f"Error converting final audio to WAV: {e}")
             return None
     
     @traceable(run_type="chain", name="TTS_Synthesize_Speech_Streaming")
@@ -337,40 +343,40 @@ class TTSEngine:
         Yields:
             bytes: Audio data chunks (WAV format), one per sentence or natural speech pause
         """
-        print(f"TTS streaming synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
+        logger.info(f"TTS streaming synthesize called with text: '{text}', type: {type(text)}, length: {len(str(text))}")
         
         # Handle empty or whitespace-only text as "don't say anything"
         if not text or not str(text).strip():
-            print("Empty or whitespace-only text provided - yielding nothing (silent)")
+            logger.info("Empty or whitespace-only text provided - yielding nothing (silent)")
             return
             
         if not self.is_initialized():
-            print("ERROR: TTS engine not initialized in synthesize_streaming method!")
-            print(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
+            logger.error("ERROR: TTS engine not initialized in synthesize_streaming method!")
+            logger.error(f"Pipeline exists: {self.pipeline is not None}, Initialized flag: {self.initialized}")
             return
             
-        print(f"TTS engine initialized, proceeding with streaming synthesis")
+        logger.info(f"TTS engine initialized, proceeding with streaming synthesis")
 
         # Split text into sentences or natural speech pauses
         sentences = self._preprocess_text(str(text).strip())
         
         if not sentences:
-            print("Text preprocessing returned no sentences")
+            logger.info("Text preprocessing returned no sentences")
             return
             
-        print(f"Processing {len(sentences)} sentences for streaming TTS")
+        logger.info(f"Processing {len(sentences)} sentences for streaming TTS")
         
         # Process each sentence individually and yield audio as soon as it's ready
         for i, sentence in enumerate(sentences):
             sentence = sentence.strip()
             if not sentence:
-                print(f"Skipping empty sentence {i+1}/{len(sentences)}")
+                logger.info(f"Skipping empty sentence {i+1}/{len(sentences)}")
                 continue
                 
             # Process this sentence - log with abbreviated content to avoid cluttering logs
             max_log_chars = 50
             log_text = sentence[:max_log_chars] + ('...' if len(sentence) > max_log_chars else '')
-            print(f"Generating audio for sentence {i+1}/{len(sentences)}: '{log_text}'")
+            logger.info(f"Generating audio for sentence {i+1}/{len(sentences)}: '{log_text}'")
             
             # Generate audio for this specific sentence
             try:
@@ -379,12 +385,12 @@ class TTSEngine:
                 audio_data = await self._generate_audio(sentence)
                 
                 if audio_data:
-                    print(f"Yielding {len(audio_data)} bytes of audio for sentence {i+1}/{len(sentences)} ({time.time() - sentence_start:.2f}s)")
+                    logger.info(f"Yielding {len(audio_data)} bytes of audio for sentence {i+1}/{len(sentences)} ({time.time() - sentence_start:.2f}s)")
                     yield audio_data
                 else:
-                    print(f"Failed to generate audio for sentence {i+1}/{len(sentences)}")
+                    logger.info(f"Failed to generate audio for sentence {i+1}/{len(sentences)}")
             except Exception as e:
-                print(f"Error generating audio for sentence {i+1}: {e}")
+                logger.error(f"Error generating audio for sentence {i+1}: {e}")
                 import traceback
                 traceback.print_exc()
                 # Continue to next sentence on error
@@ -399,7 +405,7 @@ class TTSEngine:
             bytes: Combined audio data
         """
         if not audio_chunks:
-            print("No audio chunks to combine")
+            logger.error("No audio chunks to combine")
             return None
             
         # If only one chunk, return it directly
@@ -424,22 +430,22 @@ class TTSEngine:
                             
                         # Ensure consistent sample rate
                         if sr != sample_rate:
-                            print(f"Warning: Chunk {i+1} has different sample rate ({sr} vs {sample_rate})")
+                            logger.warning(f"Warning: Chunk {i+1} has different sample rate ({sr} vs {sample_rate})")
                             
                         # Add to list
                         wav_data.append(data)
-                        print(f"Read chunk {i+1}: {len(data)} samples at {sr}Hz")
+                        logger.info(f"Read chunk {i+1}: {len(data)} samples at {sr}Hz")
                         
                 except Exception as e:
-                    print(f"Error reading chunk {i+1}: {e}")
+                    logger.error(f"Error reading chunk {i+1}: {e}")
                     
             # Check if we got any data
             if not wav_data:
-                print("No chunks could be read")
+                logger.error("No chunks could be read")
                 return None
                 
             # Concatenate audio data
-            print(f"Concatenating {len(wav_data)} audio chunks...")
+            logger.debug(f"Concatenating {len(wav_data)} audio chunks...")
             combined = np.concatenate(wav_data)
             
             # Write to buffer
@@ -450,7 +456,7 @@ class TTSEngine:
             return buffer.read()
             
         except Exception as e:
-            print(f"Error combining audio chunks: {e}")
+            logger.error(f"Error combining audio chunks: {e}")
             import traceback
             traceback.print_exc()
             return None

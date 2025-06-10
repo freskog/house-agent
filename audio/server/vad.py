@@ -11,6 +11,12 @@ import sys
 import collections
 from langsmith import traceable
 
+# Import our logging infrastructure
+from utils.logging_config import setup_logging
+
+# Set up logger for this module
+logger = setup_logging(__name__)
+
 # Cache for models
 _vad_cache = {
     "model": None,
@@ -56,7 +62,7 @@ def load_silero_vad():
         return _vad_cache["model"]
     
     try:
-        print("Loading Silero VAD model...")
+        logger.info("🎯 Loading Silero VAD model...")
         start_time = time.time()
         
         # Load model and utils directly from torch hub
@@ -74,11 +80,11 @@ def load_silero_vad():
         _vad_cache["model"] = model
         
         load_time = time.time() - start_time
-        print(f"Silero VAD model loaded in {load_time:.2f}s")
+        logger.info(f"✅ Silero VAD model loaded in {load_time:.2f}s")
         
         return model
     except Exception as e:
-        print(f"Error loading Silero VAD model: {e}")
+        logger.error(f"❌ Error loading Silero VAD model: {e}")
         raise
 
 @traceable(run_type="chain", name="VAD_Get_Speech_Timestamps")
@@ -158,7 +164,7 @@ def get_speech_timestamps(audio_tensor, model, sampling_rate=16000,
         )
         return timestamps
     except Exception as e:
-        print(f"Error getting speech timestamps: {e}")
+        logger.error(f"❌ Error getting speech timestamps: {e}")
         return []
 
 class VADHandler:
@@ -192,22 +198,22 @@ class VADHandler:
             
         try:
             if self.config.verbose:
-                print("Loading VAD model...")
+                logger.info("🎯 Loading VAD model...")
             # Use our inlined load_silero_vad function
             self.vad_model = load_silero_vad()
             self.initialized = True
             if self.config.verbose:
-                print("VAD model loaded successfully")
+                logger.info("✅ VAD model loaded successfully")
             return True
         except Exception as e:
-            print(f"Error initializing VAD model: {e}")
+            logger.error(f"❌ Error initializing VAD model: {e}")
             return False
     
     def process_chunk(self, audio_chunk: bytes) -> VADResult:
         """Process an audio chunk and detect speech"""
         if not self.initialized:
             if not self.initialize():
-                print("WARNING: VAD not initialized in process_chunk")
+                logger.warning("⚠️ VAD not initialized in process_chunk")
                 return VADResult()
         
         try:
@@ -229,7 +235,7 @@ class VADHandler:
             if len(audio_np) > 0:
                 self.chunk_buffer.append(audio_np)
             else:
-                print("WARNING: Empty audio chunk received")
+                logger.warning("⚠️ Empty audio chunk received")
                 return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence * 0.9)
             
             # Check for incorrect audio length/sample rate issues
@@ -240,8 +246,8 @@ class VADHandler:
             if actual_samples > 2.5 * expected_samples:
                 # Existing resampling code preserved here
                 if self.config.verbose:
-                    print(f"WARNING: Large audio chunk detected ({actual_samples} samples, expected ~{expected_samples})")
-                    print("This might indicate a sample rate mismatch. Attempting to correct...")
+                    logger.warning(f"⚠️ Large audio chunk detected ({actual_samples} samples, expected ~{expected_samples})")
+                    logger.info("🔧 Attempting to correct sample rate mismatch...")
                 
                 likely_source_rate = None
                 for rate in [44100, 48000, 96000, 22050]:
@@ -252,7 +258,7 @@ class VADHandler:
                 
                 if likely_source_rate:
                     if self.config.verbose:
-                        print(f"Audio appears to be at {likely_source_rate}Hz instead of {self.config.sample_rate}Hz")
+                        logger.info(f"🎯 Audio appears to be at {likely_source_rate}Hz instead of {self.config.sample_rate}Hz")
                     
                     # Resample to the correct rate
                     import scipy.signal as signal
@@ -261,7 +267,7 @@ class VADHandler:
                     audio_np = np.int16(resampled)
                     audio_chunk = audio_np.tobytes()
                     if self.config.verbose:
-                        print(f"Resampled from {actual_samples} to {len(audio_np)} samples")
+                        logger.info(f"✅ Resampled from {actual_samples} to {len(audio_np)} samples")
                     
                     # Update the buffer with the resampled audio
                     self.chunk_buffer[-1] = audio_np
@@ -309,7 +315,7 @@ class VADHandler:
                             
                             # Only log when speech is detected if verbose is enabled
                             if self.config.verbose:
-                                print(f"Debug: SPEECH DETECTED! Confidence: {confidence:.2f}, Timestamps: {timestamps}")
+                                logger.debug(f"🎤 SPEECH DETECTED! Confidence: {confidence:.2f}, Timestamps: {timestamps}")
                     
                     # Update state with results - include hysteresis logic only here
                     if is_speech:
@@ -337,7 +343,7 @@ class VADHandler:
                     return result
                     
                 except Exception as e:
-                    print(f"Error in VAD processing: {e}")
+                    logger.error(f"❌ Error in VAD processing: {e}")
                     if self.config.verbose:
                         import traceback
                         traceback.print_exc()
@@ -347,7 +353,7 @@ class VADHandler:
             return VADResult(is_speech=self.last_is_speech, confidence=self.last_confidence * 0.9)
             
         except Exception as e:
-            print(f"Error in VAD handler: {e}")
+            logger.error(f"❌ Error in VAD handler: {e}")
             import traceback
             traceback.print_exc()
             return VADResult()

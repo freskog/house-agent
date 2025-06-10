@@ -439,7 +439,7 @@ Please retry with the correct context parameter."""
             elif query:
                 # Context is now required from the LLM, but provide fallback just in case
                 if not context or not isinstance(context, dict):
-                    print(f"WARNING: Invalid context provided for query '{query}': {context}, using fallback detection")
+                    logger.warning(f"Invalid context provided for query '{query}': {context}, using fallback detection")
                     context = _get_query_context(query)
                 
                 # Search based on provided context
@@ -461,7 +461,7 @@ Please retry with the correct context parameter."""
                     # Default fallback
                     search_types = ["track", "album", "artist"]
                 
-                print(f"Playing music with context: {context}, search_types: {search_types}")
+                logger.info(f"🎵 Playing music with context: {context}, search_types: {search_types}")
                 
                 results = _get_spotify_client().search(
                     query, 
