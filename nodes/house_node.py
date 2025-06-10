@@ -283,6 +283,7 @@ class HouseNode(BaseNode):
         current_date = datetime.now().strftime("%B %d, %Y")
         ha_context = self.get_homeassistant_context()
         
+        
         prompt = f"""You are a home automation specialist. Today is {current_date}.
 
 User request: "{user_request}"
@@ -299,20 +300,49 @@ Entity Matching Rules:
 3. "bedroom temperature" → Look for thermostats/sensors with "bedroom" in the name
 4. "front door lock" → Look for locks with "front door" in the name
 
+State Query Rules:
+- "Is X on/off?" → Use GetLiveContext to check current state
+- "What's the temperature?" → Use GetLiveContext to get current value
+- "What mode is X in?" → Use GetLiveContext to get current mode
+
 Available Tools:
 - HassTurnOn(name="exact_entity_name") - Turn on a device
 - HassTurnOff(name="exact_entity_name") - Turn off a device  
-- HassSetTemperature(name="exact_entity_name", temperature=X) - Set temperature
-- (Check context for full list of available tools)
+- HassClimateSetTemperature(name="exact_entity_name", temperature=X) - Set temperature for climate devices (thermostats, jacuzzis, etc.)
+- HassLightSet(name="exact_entity_name", brightness_pct=X, color="color") - Set light brightness/color
+- HassSetPosition(name="exact_entity_name", position=X) - Set position of covers, blinds, etc. (0-100)
+- HassSetVolume(name="exact_entity_name", volume_level=X) - Set volume of Home Assistant media players (0-1.0)
+- HassMediaPause(name="exact_entity_name") - Pause media players
+- HassMediaUnpause(name="exact_entity_name") - Resume/unpause media players
+- HassMediaNext(name="exact_entity_name") - Skip to next track/item
+- HassMediaPrevious(name="exact_entity_name") - Go to previous track/item
+- HassBroadcast(message="text_to_announce") - Broadcast message through home speakers
+- GetLiveContext(entity_name="exact_entity_name") - Get current state/value of devices or sensors
+- HassListAddItem(name="list_name", item="item_text") - Add item to todo list
+- HassListCompleteItem(name="list_name", item="item_text") - Complete item on todo list
 
 TOOL_CALLS FORMAT REQUIREMENTS:
 For execute_tools action, tool_calls MUST be a list of objects with "name" and "arguments" keys:
 [{{"name": "HassTurnOn", "arguments": {{"name": "Fredrik's office ceiling light"}}}}]
 
+Examples:
+- Turn on lights: {{"name": "HassTurnOn", "arguments": {{"name": "Fredrik's office ceiling light"}}}}
+- Set temperature: {{"name": "HassClimateSetTemperature", "arguments": {{"name": "Jacuzzi", "temperature": 38}}}}
+- Dim lights: {{"name": "HassLightSet", "arguments": {{"name": "Living room Light", "brightness_pct": 30}}}}
+- Open blinds: {{"name": "HassSetPosition", "arguments": {{"name": "Fredrik's Office Blind", "position": 100}}}}
+- Pause TV: {{"name": "HassMediaPause", "arguments": {{"name": "Living room TV"}}}}
+- Set TV volume: {{"name": "HassSetVolume", "arguments": {{"name": "Living room TV", "volume_level": 0.5}}}}
+- Check temperature: {{"name": "GetLiveContext", "arguments": {{"entity_name": "Jacuzzi"}}}}
+- Announce message: {{"name": "HassBroadcast", "arguments": {{"message": "Dinner is ready!"}}}}
+
 Domain Detection Rules:
-- If request involves ONLY home automation (lights, temperature, etc.) → this is purely house domain
-- If request involves home automation AND other domains (music, search, etc.) → escalate if called_by="router"
+- If request involves ONLY home automation (lights, temperature, covers, Home Assistant media players, etc.) → this is purely house domain
+- If request involves home automation AND other domains (music streaming, search, etc.) → escalate if called_by="router"  
 - If called_by="agent" → never escalate, just handle house automation part
+- Media player control of Home Assistant devices (TVs, speakers, volume, pause/play) = house domain
+- Music streaming requests (Spotify, Apple Music, "play song X") = escalate to music domain
+- Volume control of Home Assistant media players = house domain (use HassSetVolume)
+- Playing specific songs/artists = music domain (escalate)
 
 Choose ONE action:
 
