@@ -10,7 +10,7 @@ Simple, focused implementation that:
 
 from typing import Dict, Any, Optional, List
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from .base_node import BaseNode, AgentState
 
 import os
@@ -39,10 +39,10 @@ class SearchNode(BaseNode):
             super().__init__(search_tools, "Search")
             
             # Initialize LLM with tools bound for function calling
-            self.llm = ChatOpenAI(
-                model="gpt-4o-mini",
+            self.llm = ChatGroq(
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
                 temperature=0,
-                streaming=False,
+                streaming=True,
                 max_tokens=1024,
                 timeout=10
             ).bind_tools(search_tools)
@@ -265,7 +265,7 @@ Your job:
 Response:"""
 
         try:
-            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=150)
+            summary_llm = ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, streaming=True, max_tokens=150)
             messages = [SystemMessage(content=system_prompt)]
             response = await summary_llm.ainvoke(messages)
             

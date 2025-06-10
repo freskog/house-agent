@@ -13,7 +13,7 @@ Provides helpful guidance to users when their intent is unclear.
 
 from typing import Dict, Any, Optional, List
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from .base_node import BaseNode, AgentState
 from .schemas import SpecialistResponse
 
@@ -31,10 +31,10 @@ class ClarificationNode(BaseNode):
         super().__init__([], "Clarification")
         
         # Initialize LLM for structured outputs
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
+        self.llm = ChatGroq(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             temperature=0,
-            streaming=False
+            streaming=True
         ).with_structured_output(SpecialistResponse)
         
         self.logger.info("Initialized Clarification node with structured outputs")

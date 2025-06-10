@@ -7,7 +7,7 @@ making it much simpler while preserving all functionality.
 
 from typing import Dict, Any, Optional, List
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from .base_node import BaseNode
 from .schemas import AgentState, AgentPlan, create_step_message, aggregate_simple_results
 import logging
@@ -34,10 +34,10 @@ class AgentNode(BaseNode):
         self.specialists = specialists
         
         # Create LLM for planning (same as before)
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
+        self.llm = ChatGroq(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             temperature=0,
-            streaming=False,
+            streaming=True,
             max_tokens=2048  # Planning shouldn't need excessive tokens
         ).with_structured_output(AgentPlan, method="json_mode")
         
@@ -366,7 +366,7 @@ For sleep questions, give the recommended hours clearly and simply."""
 
         try:
             # Use a simple LLM call for summarization
-            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=150)
+            summary_llm = ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, streaming=True, max_tokens=150)
             response = await summary_llm.ainvoke([SystemMessage(content=system_prompt)])
             return response.content if response.content else "I found some information but couldn't summarize it clearly."
         except Exception as e:

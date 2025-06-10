@@ -14,7 +14,7 @@ Currently integrates with Home Assistant but designed to support multiple home a
 
 from typing import Dict, Any, Optional, List
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_mcp_adapters.client import MultiServerMCPClient, SSEConnection
 from .base_node import BaseNode, AgentState
 from .schemas import SpecialistResponse
@@ -40,10 +40,10 @@ class HouseNode(BaseNode):
         super().__init__([], "House")
         
         # Initialize LLM for structured outputs
-        self.llm = ChatOpenAI(
-            model="gpt-4o-mini",
+        self.llm = ChatGroq(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             temperature=0,
-            streaming=False
+            streaming=True
         ).with_structured_output(SpecialistResponse, method="function_calling")
         
         if not self.ha_api_key:
@@ -569,7 +569,7 @@ If there's an error, explain it in simple terms.
 Response:"""
 
         try:
-            response_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
+            response_llm = ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, streaming=True, max_tokens=100)
             response = await response_llm.ainvoke([SystemMessage(content=system_prompt)])
             
             if response.content:

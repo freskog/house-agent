@@ -15,7 +15,7 @@ Currently integrates with Spotify but designed to support multiple music service
 
 from typing import Dict, Any, Optional, List
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from .base_node import BaseNode, AgentState
 
 from spotify import create_spotify_tools
@@ -49,10 +49,10 @@ class MusicNode(BaseNode):
             super().__init__(music_tools, "Music")
             
             # Initialize LLM with tools bound for function calling
-            self.llm = ChatOpenAI(
-                model="gpt-4o-mini",
+            self.llm = ChatGroq(
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
                 temperature=0,
-                streaming=False
+                streaming=True
             ).bind_tools(music_tools)
             
             self.logger.info(f"Initialized Music node with {len(music_tools)} tools and function calling")
@@ -60,10 +60,10 @@ class MusicNode(BaseNode):
             self.logger.error(f"Failed to initialize music tools: {e}")
             # Initialize with empty tools if music setup fails
             super().__init__([], "Music")
-            self.llm = ChatOpenAI(
-                model="gpt-4o-mini",
+            self.llm = ChatGroq(
+                model="meta-llama/llama-4-maverick-17b-128e-instruct",
                 temperature=0,
-                streaming=False
+                streaming=True
             )
             self.logger.warning("Music node initialized without tools due to setup failure")
     
@@ -362,7 +362,7 @@ If they searched for music, mention the results found.
 Response:"""
 
         try:
-            summary_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=False, max_tokens=100)
+            summary_llm = ChatGroq(model="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0, streaming=True, max_tokens=100)
             messages = [SystemMessage(content=system_prompt)]
             response = await summary_llm.ainvoke(messages)
             
